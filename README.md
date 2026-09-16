@@ -113,7 +113,7 @@ $rows = $dao->getSqlBuilder()
     ->execute();
 ```
 
-Complex joins and multi-table queries belong in the Service layer, not the DAO.
+Complex joins and multi-table queries also belong in the DAO — all database access logic is encapsulated here. The Service layer should never touch the database directly.
 
 ## Architecture
 
@@ -131,7 +131,7 @@ PDO / MySQL
 
 - **SQL layer** knows nothing about Domain
 - **Domain layer** knows nothing about SQL or DAO
-- **DAO layer** knows both, but only does simple conversion — no business logic
+- **DAO layer** knows both SQL and Domain — encapsulates ALL data access logic including complex joins, no business logic
 
 ## Why a Trait?
 
@@ -260,7 +260,7 @@ $rows = $dao->getSqlBuilder()
     ->execute();
 ```
 
-复杂的关联查询和多表查询应放在 Service 层，不在 DAO 中处理。
+复杂的关联查询和多表查询同样应放在 DAO 中 — 所有数据访问逻辑都封装在 DAO 层，Service 层不应直接操作数据库。
 
 ## 架构
 
@@ -278,7 +278,7 @@ PDO / MySQL
 
 - **SQL 层**不知道 Domain 的存在
 - **Domain 层**不知道 SQL 和 DAO 的存在
-- **DAO 层**同时知道两者，但只做简单转换 — 不含业务逻辑
+- **DAO 层**同时知道 SQL 和 Domain — 封装所有数据访问逻辑（含复杂关联查询），不含业务逻辑
 
 ## 为什么用 Trait？
 
