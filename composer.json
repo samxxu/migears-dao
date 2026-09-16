@@ -1,0 +1,37 @@
+{
+    "name": "migears/dao",
+    "description": "Minimalist DAO trait \u2014 connects SQL layer with Domain objects",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": "^8.1",
+        "ext-pdo": "*",
+        "psr/log": "^3.0",
+        "migears/sql": "^2.0",
+        "migears/domain": "^2.0"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10"
+    },
+    "autoload": {
+        "psr-4": {
+            "MiGears\\Dao\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "MiGears\\Dao\\Tests\\": "tests/"
+        }
+    },
+    "repositories": {
+        "migears/sql": {
+            "type": "path",
+            "url": "../migears-sql"
+        },
+        "migears/domain": {
+            "type": "path",
+            "url": "../migears-domain"
+        }
+    },
+    "version": "2.0.0"
+}
