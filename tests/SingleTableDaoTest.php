@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace MiGears\Dao\Tests;
 
 use PDO;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 use PHPUnit\Framework\TestCase;
 use MiGears\Dao\SingleTableDao;
 use MiGears\Domain\DataAccess;
@@ -48,7 +50,7 @@ class SingleTableDaoTest extends TestCase
             $stmt->execute($user);
         }
 
-        $this->dao = new UserDao($pdo);
+        $this->dao = new UserDao($pdo, new NullLogger());
     }
 
     public function testGetByIdReturnsRow(): void
@@ -168,6 +170,13 @@ class SingleTableDaoTest extends TestCase
         $this->assertCount(2, $result['records']);
     }
 
+    public function testPaginateBeyondLastPage(): void
+    {
+        $result = $this->dao->paginate(3, 2);
+        $this->assertEquals(5, $result['total']);
+        $this->assertCount(1, $result['records']);
+    }
+
     public function testGetTable(): void
     {
         $this->assertEquals('users', $this->dao->getTable());
@@ -188,15 +197,15 @@ class SingleTableDaoTest extends TestCase
         $this->expectException(SqlException::class);
 
         $pdo = new PDO('sqlite::memory:');
-        new class($pdo) {
+        new class($pdo, new NullLogger()) {
             use SingleTableDao;
 
             protected string $table = '';
             protected string $idColumn = 'id';
 
-            public function __construct(PDO $pdo)
+            public function __construct(PDO $pdo, LoggerInterface $logger)
             {
-                $this->initDao($pdo);
+                $this->initDao($pdo, $logger);
             }
         };
     }
@@ -213,12 +222,26 @@ class SingleTableDaoTest extends TestCase
         SQL);
         $pdo->exec("INSERT INTO posts (title, content) VALUES ('Hello', 'World')");
 
-        $dao = new PostDao($pdo);
+        $dao = new PostDao($pdo, new NullLogger());
         $post = $dao->getById(1);
 
         $this->assertNotNull($post);
         $this->assertEquals('Hello', $post['title']);
         $this->assertEquals('post_id', $dao->getIdColumn());
+    }
+
+    public function testEmptyTableQueries(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+        $pdo->exec('CREATE TABLE posts (post_id INTEGER PRIMARY KEY AUTOINCREMENT, title VARCHAR(100), content TEXT)');
+
+        $dao = new PostDao($pdo, new NullLogger());
+        $this->assertSame([], $dao->getAll());
+        $this->assertSame([], $dao->getByIds([1, 2]));
+        $this->assertSame(0, $dao->count());
+        $this->assertNull($dao->getById(1));
     }
 
     public function testDaoWithDomainRoundTrip(): void
@@ -239,9 +262,9 @@ class UserDao
     protected string $table = 'users';
     protected string $idColumn = 'id';
 
-    public function __construct(PDO $pdo)
+    public function __construct(PDO $pdo, LoggerInterface $logger)
     {
-        $this->initDao($pdo);
+        $this->initDao($pdo, $logger);
     }
 }
 
@@ -252,9 +275,9 @@ class PostDao
     protected string $table = 'posts';
     protected string $idColumn = 'post_id';
 
-    public function __construct(PDO $pdo)
+    public function __construct(PDO $pdo, LoggerInterface $logger)
     {
-        $this->initDao($pdo);
+        $this->initDao($pdo, $logger);
     }
 }
 

@@ -6,7 +6,6 @@ namespace MiGears\Dao;
 
 use PDO;
 use Psr\Log\LoggerInterface;
-use Psr\Log\NullLogger;
 use MiGears\Sql\SqlBuilder;
 use MiGears\Sql\Exception\RecordNotFoundException;
 use MiGears\Sql\Exception\SqlException;
@@ -25,7 +24,7 @@ use MiGears\Sql\Exception\SqlException;
  *       protected string $idColumn = 'id';
  *   }
  *
- *   $dao = new UserDao($pdo);
+ *   $dao = new UserDao($pdo, $logger);
  *   $row = $dao->getById(1);     // array|null
  *   $id  = $dao->insert($data);  // last insert id
  *   $n   = $dao->update($data);  // affected rows
@@ -41,12 +40,12 @@ trait SingleTableDao
      * Call this from the using class constructor.
      * The using class must define $table and $idColumn properties.
      */
-    protected function initDao(PDO $pdo, ?LoggerInterface $logger = null): void
+    protected function initDao(PDO $pdo, LoggerInterface $logger): void
     {
         if (!isset($this->table) || $this->table === '') {
             throw new SqlException(static::class . ' must define $table property');
         }
-        $this->sql = new SqlBuilder($pdo, $logger ?? new NullLogger());
+        $this->sql = new SqlBuilder($pdo, $logger);
     }
 
     /**
