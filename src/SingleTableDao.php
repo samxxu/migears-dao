@@ -32,7 +32,20 @@ use MiGears\Sql\Exception\SqlException;
  */
 trait SingleTableDao
 {
-    protected SqlBuilder $sql;
+    protected ?SqlBuilder $sql = null;
+
+    /**
+     * Returns the underlying SqlBuilder, ensuring the DAO is initialized.
+     *
+     * @throws SqlException if initDao() has not been called
+     */
+    final protected function sql(): SqlBuilder
+    {
+        if ($this->sql === null) {
+            throw new SqlException(static::class . ' has not been initialized; call initDao() from the constructor.');
+        }
+        return $this->sql;
+    }
 
     /**
      * Initializes the DAO with a PDO connection.
@@ -45,6 +58,9 @@ trait SingleTableDao
         if (!isset($this->table) || $this->table === '') {
             throw new SqlException(static::class . ' must define $table property');
         }
+        if (!isset($this->idColumn) || $this->idColumn === '') {
+            throw new SqlException(static::class . ' must define $idColumn property');
+        }
         $this->sql = new SqlBuilder($pdo, $logger);
     }
 
@@ -55,7 +71,7 @@ trait SingleTableDao
      */
     public function getById(int|string $id): ?array
     {
-        return $this->sql->select()
+        return $this->sql()->select()
             ->from($this->table)
             ->filter([$this->idColumn => $id])
             ->single();
@@ -99,7 +115,7 @@ trait SingleTableDao
         }
 
         $placeholderStr = implode(', ', $placeholders);
-        $rows = $this->sql->select()
+        $rows = $this->sql()->select()
             ->from($this->table)
             ->where("`{$this->idColumn}` IN ({$placeholderStr})", $params)
             ->execute();
@@ -119,7 +135,7 @@ trait SingleTableDao
      */
     public function getAll(): array
     {
-        return $this->sql->select()
+        return $this->sql()->select()
             ->from($this->table)
             ->orderBy("`{$this->idColumn}` DESC")
             ->execute();
@@ -129,13 +145,18 @@ trait SingleTableDao
      * Inserts a record, returns the auto-increment ID.
      *
      * @param array<string, mixed> $data
+     * @throws SqlException if the insert succeeds but no ID is available
      */
     public function insert(array $data): string
     {
-        return $this->sql->insert($this->table)
+        $id = $this->sql()->insert($this->table)
             ->values($data)
             ->execute()
             ->lastInsertId();
+        if ($id === false) {
+            throw new SqlException('Insert succeeded but no last insert ID was returned by the driver');
+        }
+        return $id;
     }
 
     /**
@@ -157,7 +178,7 @@ trait SingleTableDao
             return 0;
         }
 
-        return $this->sql->update($this->table)
+        return $this->sql()->update($this->table)
             ->set($data)
             ->filter([$this->idColumn => $id])
             ->execute();
@@ -168,7 +189,7 @@ trait SingleTableDao
      */
     public function delete(int|string $id): int
     {
-        return $this->sql->delete($this->table)
+        return $this->sql()->delete($this->table)
             ->filter([$this->idColumn => $id])
             ->execute();
     }
@@ -178,7 +199,7 @@ trait SingleTableDao
      */
     public function count(): int
     {
-        return $this->sql->select()
+        return $this->sql()->select()
             ->from($this->table)
             ->count();
     }
@@ -190,7 +211,7 @@ trait SingleTableDao
      */
     public function paginate(int $page, int $pageSize): array
     {
-        return $this->sql->select()
+        return $this->sql()->select()
             ->from($this->table)
             ->orderBy("`{$this->idColumn}` DESC")
             ->paginate($page, $pageSize);
@@ -198,10 +219,12 @@ trait SingleTableDao
 
     /**
      * Gets the underlying SqlBuilder for complex queries.
+     *
+     * @throws SqlException if initDao() has not been called
      */
     public function getSqlBuilder(): SqlBuilder
     {
-        return $this->sql;
+        return $this->sql();
     }
 
     /**

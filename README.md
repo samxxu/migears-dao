@@ -107,7 +107,7 @@ class UserDao
 ### CRUD Operations
 
 ```php
-$dao = new UserDao($pdo);
+$dao = new UserDao($pdo, $logger);
 
 // Read
 $row = $dao->getById(1);                    // array|null
@@ -118,7 +118,7 @@ $count = $dao->count();                      // int
 $page = $dao->paginate(1, 20);               // ['records' => [...], 'total' => 100]
 
 // Write
-$id = $dao->insert(['user_name' => 'Alice', 'email' => 'a@b.com']);  // last insert id
+$id = $dao->insert(['user_name' => 'Alice', 'email' => 'a@b.com']);  // last insert id (string)
 $n = $dao->update(['id' => 1, 'user_name' => 'Bob']);                  // affected rows
 $n = $dao->delete(1);                                                  // affected rows
 ```
@@ -134,6 +134,49 @@ echo $user->user_name;  // "Alice"
 // Domain → Array → SQL
 $dao->update($user->toArray());
 ```
+
+### Using CachedDao
+
+`CachedDao` wraps every read method with a cache layer and returns
+**hydrated Domain objects** instead of raw arrays:
+
+```php
+$user  = $cachedDao->getById(1);          // ?UserDomain
+$user  = $cachedDao->getByIdOrFail(1);    // UserDomain (throws if not found)
+$users = $cachedDao->getByIds([1, 2]);    // [id => UserDomain]
+$all   = $cachedDao->getAll();            // UserDomain[]
+$page  = $cachedDao->paginate(1, 20);     // ['records' => UserDomain[], 'total' => int]
+```
+
+Write operations (`insert` / `update` / `delete`) automatically invalidate
+the primary-key cache entry. To clear additional cache keys (e.g. lookups
+by secondary indexes like `byOpenId`), override the `deleteCacheFor()` hook:
+
+```php
+class UserDao
+{
+    use CachedDao;
+
+    protected string $table = 'users';
+    protected string $idColumn = 'id';
+    protected string $domainClass = UserDomain::class;
+
+    protected function deleteCacheFor(?object $user): void
+    {
+        if ($user !== null) {
+            $this->cache->delete('user_by_openid_' . $user->open_id);
+        }
+    }
+}
+```
+
+`deleteCacheFor()` receives the fresh Domain object (an uncached read
+taken after the write) so the hook can inspect current field values.
+It receives `null` when the record no longer exists (e.g. after a delete).
+
+`insert()` preserves a caller-supplied primary key — pass `idColumn` in
+the data array for UUID or application-generated keys. When omitted,
+the auto-increment ID from the database is used.
 
 ## Custom Primary Key
 
@@ -326,7 +369,7 @@ class UserDao
 ### CRUD 操作
 
 ```php
-$dao = new UserDao($pdo);
+$dao = new UserDao($pdo, $logger);
 
 // 读
 $row = $dao->getById(1);                    // array|null
@@ -337,7 +380,7 @@ $count = $dao->count();                      // int
 $page = $dao->paginate(1, 20);               // ['records' => [...], 'total' => 100]
 
 // 写
-$id = $dao->insert(['user_name' => 'Alice', 'email' => 'a@b.com']);  // 自增 ID
+$id = $dao->insert(['user_name' => 'Alice', 'email' => 'a@b.com']);  // 自增 ID（string）
 $n = $dao->update(['id' => 1, 'user_name' => 'Bob']);                  // 影响行数
 $n = $dao->delete(1);                                                  // 影响行数
 ```
@@ -353,6 +396,48 @@ echo $user->user_name;  // "Alice"
 // Domain → 数组 → SQL
 $dao->update($user->toArray());
 ```
+
+### 使用 CachedDao
+
+`CachedDao` 为所有读方法加上缓存层，并返回**已 hydrate 的 Domain 对象**
+而非原始数组：
+
+```php
+$user  = $cachedDao->getById(1);          // ?UserDomain
+$user  = $cachedDao->getByIdOrFail(1);    // UserDomain（找不到抛异常）
+$users = $cachedDao->getByIds([1, 2]);    // [id => UserDomain]
+$all   = $cachedDao->getAll();            // UserDomain[]
+$page  = $cachedDao->paginate(1, 20);     // ['records' => UserDomain[], 'total' => int]
+```
+
+写操作（`insert` / `update` / `delete`）会自动失效主键缓存。如需清理
+额外的缓存键（例如按二级索引查找的 `byOpenId`），重写 `deleteCacheFor()`
+钩子即可：
+
+```php
+class UserDao
+{
+    use CachedDao;
+
+    protected string $table = 'users';
+    protected string $idColumn = 'id';
+    protected string $domainClass = UserDomain::class;
+
+    protected function deleteCacheFor(?object $user): void
+    {
+        if ($user !== null) {
+            $this->cache->delete('user_by_openid_' . $user->open_id);
+        }
+    }
+}
+```
+
+`deleteCacheFor()` 收到的是**新鲜读出的** Domain 对象（写操作后绕过缓存
+重新读取），因此钩子可以检查最新的字段值。记录已不存在时（例如 delete
+之后）收到 `null`。
+
+`insert()` 会保留调用方传入的主键值——UUID 或应用生成的主键只需在
+data 数组中带上 `idColumn` 字段即可。不传时使用数据库返回的自增 ID。
 
 ## 自定义主键
 

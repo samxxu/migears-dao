@@ -12,6 +12,7 @@ use MiGears\Cache\ArrayCache;
 use MiGears\Cache\CacheInterface;
 use MiGears\Dao\CachedDao;
 use MiGears\Domain\DataAccess;
+use MiGears\Sql\Exception\RecordNotFoundException;
 use MiGears\Sql\Exception\SqlException;
 
 class CachedDaoTest extends TestCase
@@ -59,6 +60,19 @@ class CachedDaoTest extends TestCase
         $this->assertSame('Alice', $user->user_name);
     }
 
+    public function testGetByIdOrFailReturnsDomain(): void
+    {
+        $user = $this->dao->getByIdOrFail(1);
+        $this->assertInstanceOf(CachedUserDomain::class, $user);
+        $this->assertSame('Alice', $user->user_name);
+    }
+
+    public function testGetByIdOrFailThrowsWhenNotFound(): void
+    {
+        $this->expectException(RecordNotFoundException::class);
+        $this->dao->getByIdOrFail(999);
+    }
+
     public function testGetByIdSecondCallComesFromCache(): void
     {
         $first = $this->dao->getById(1);
@@ -84,7 +98,7 @@ class CachedDaoTest extends TestCase
     public function testInsertThenGetByIdReturnsDomain(): void
     {
         $id = $this->dao->insert(['user_name' => 'Dave', 'email' => 'dave@example.com', 'age' => 40, 'status' => 1]);
-        $this->assertSame(4, $id);
+        $this->assertSame('4', $id);
 
         $user = $this->dao->getById($id);
         $this->assertInstanceOf(CachedUserDomain::class, $user);
@@ -177,7 +191,7 @@ class CachedDaoTest extends TestCase
 
         // insert 会拿到自增 id=4，应顺手清理残留缓存
         $newId = $this->dao->insert(['user_name' => 'Frank', 'email' => 'f@example.com', 'age' => 30, 'status' => 1]);
-        $this->assertSame(4, $newId);
+        $this->assertSame('4', $newId);
         $this->assertFalse($this->cache->has('users_4'));
 
         // 读到的应是 DB 新记录，而非脏对象
@@ -201,6 +215,39 @@ class CachedDaoTest extends TestCase
         $dao->update(['id' => 1, 'user_name' => 'Renamed']);
         $this->assertSame(1, $dao->hookCalls);
         $this->assertSame('Renamed', $dao->hookDomain?->user_name);
+    }
+
+    public function testInsertWithExplicitIdPreservesPrimaryKey(): void
+    {
+        $id = $this->dao->insert(['id' => 100, 'user_name' => 'Zoe', 'email' => 'zoe@example.com', 'age' => 28, 'status' => 1]);
+        $this->assertSame('100', $id);
+
+        $user = $this->dao->getById(100);
+        $this->assertInstanceOf(CachedUserDomain::class, $user);
+        $this->assertSame('Zoe', $user->user_name);
+    }
+
+    public function testPaginateHydratesDomains(): void
+    {
+        $result = $this->dao->paginate(1, 2);
+        $this->assertSame(3, $result['total']);
+        $this->assertCount(2, $result['records']);
+        $this->assertContainsOnlyInstancesOf(CachedUserDomain::class, $result['records']);
+        $this->assertSame('Charlie', $result['records'][0]->user_name);
+    }
+
+    public function testDeleteCacheFailureDoesNotPropagate(): void
+    {
+        $flakyCache = $this->createMock(CacheInterface::class);
+        $flakyCache->method('get')->willReturn(null);
+        $flakyCache->method('delete')->willThrowException(new \RuntimeException('cache down'));
+        $flakyCache->method('set')->willReturn(true);
+
+        $dao = new CachedUserDao($this->pdo, new NullLogger(), $flakyCache);
+
+        // Cache failure during delete must not break the write
+        $affected = $dao->delete(1);
+        $this->assertSame(1, $affected);
     }
 }
 

@@ -210,6 +210,23 @@ class SingleTableDaoTest extends TestCase
         };
     }
 
+    public function testDaoWithoutIdColumnThrowsException(): void
+    {
+        $this->expectException(SqlException::class);
+
+        $pdo = new PDO('sqlite::memory:');
+        new class($pdo, new NullLogger()) {
+            use SingleTableDao;
+
+            protected string $table = 'users';
+
+            public function __construct(PDO $pdo, LoggerInterface $logger)
+            {
+                $this->initDao($pdo, $logger);
+            }
+        };
+    }
+
     public function testCustomIdColumnDao(): void
     {
         $pdo = new PDO('sqlite::memory:');
@@ -252,6 +269,25 @@ class SingleTableDaoTest extends TestCase
 
         $backToArray = $user->toArray();
         $this->assertEquals($row, $backToArray);
+    }
+
+    public function testUninitializedDaoThrowsSqlException(): void
+    {
+        $this->expectException(SqlException::class);
+
+        $pdo = new PDO('sqlite::memory:');
+        $dao = new class($pdo, new NullLogger()) {
+            use SingleTableDao;
+
+            protected string $table = 'users';
+            protected string $idColumn = 'id';
+
+            public function __construct(PDO $pdo, LoggerInterface $logger)
+            {
+                // Deliberately skip initDao() to simulate the error
+            }
+        };
+        $dao->getById(1);
     }
 }
 

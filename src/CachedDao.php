@@ -8,6 +8,7 @@ use PDO;
 use Psr\Log\LoggerInterface;
 use MiGears\Cache\CacheInterface;
 use MiGears\Sql\Exception\SqlException;
+use MiGears\Sql\Exception\RecordNotFoundException;
 
 /**
  * Cached single-table DAO trait.
@@ -40,6 +41,7 @@ trait CachedDao
         insert as protected rawInsert;
         update as protected rawUpdate;
         delete as protected rawDelete;
+        paginate as protected rawPaginate;
     }
 
     protected CacheInterface $cache;
@@ -81,6 +83,24 @@ trait CachedDao
         return $domain;
     }
 
+    /**
+     * Returns the hydrated Domain object for the given primary key,
+     * or throws RecordNotFoundException if no such record exists.
+     *
+     * Overrides SingleTableDao::getByIdOrFail() so the return type matches
+     * CachedDao::getById() (Domain object instead of raw array).
+     *
+     * @throws RecordNotFoundException
+     */
+    public function getByIdOrFail(int|string $id): object
+    {
+        $domain = $this->getById($id);
+        if ($domain === null) {
+            throw new RecordNotFoundException($this->table, $id);
+        }
+        return $domain;
+    }
+
     public function getByIds(array $ids): array
     {
         $ids = array_values(array_unique($ids));
@@ -115,17 +135,29 @@ trait CachedDao
         return array_map(fn(array $row) => $this->hydrate($row), $this->rawGetAll());
     }
 
+    /**
+     * Paginated query with hydrated Domain objects in records.
+     *
+     * @return array{records: array<int, object>, total: int}
+     */
+    public function paginate(int $page, int $pageSize): array
+    {
+        $result = $this->rawPaginate($page, $pageSize);
+        $result['records'] = array_map(fn(array $row) => $this->hydrate($row), $result['records']);
+        return $result;
+    }
+
     public function count(): int
     {
         return $this->rawCount();
     }
 
-    public function insert(array $data): int
+    public function insert(array $data): string
     {
-        unset($data[$this->idColumn]);
-        $id = (int) $this->rawInsert($data);
+        $explicitId = $data[$this->idColumn] ?? null;
+        $id = $this->rawInsert($data);
         try {
-            $this->cacheRemove($id);
+            $this->cacheRemove($explicitId ?? $id);
         } catch (\Throwable $e) {
         }
         return $id;
@@ -150,7 +182,10 @@ trait CachedDao
     public function delete(int|string $id): int
     {
         $affected = $this->rawDelete($id);
-        $this->cacheRemove((int) $id);
+        try {
+            $this->cacheRemove($id);
+        } catch (\Throwable $e) {
+        }
         return $affected;
     }
 
