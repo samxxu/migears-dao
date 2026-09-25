@@ -249,6 +249,29 @@ class CachedDaoTest extends TestCase
         $affected = $dao->delete(1);
         $this->assertSame(1, $affected);
     }
+
+    public function testUpdateWithStringPrimaryKeyInvalidatesCache(): void
+    {
+        $this->pdo->exec('CREATE TABLE uuid_users (uuid TEXT PRIMARY KEY, user_name VARCHAR(100) NOT NULL)');
+        $uuid = '550e8400-e29b-41d4-a716-446655440000';
+        $dao = new UuidUserDao($this->pdo, new NullLogger(), $this->cache);
+        $dao->insert(['uuid' => $uuid, 'user_name' => 'before']);
+
+        // 首次读取写入缓存
+        $this->assertSame('before', $dao->getById($uuid)->user_name);
+        $this->assertTrue($this->cache->has('uuid_users_' . $uuid));
+
+        $dao->update(['uuid' => $uuid, 'user_name' => 'after']);
+
+        // 必须以原始字符串主键失效缓存，而不是 (int) 强转后的错误键
+        $this->assertFalse($this->cache->has('uuid_users_' . $uuid));
+        $this->assertSame('after', $dao->getById($uuid)->user_name);
+
+        // deleteCacheFor 钩子收到正确的 domain，而非 null（insert 与 update 各触发一次）
+        $this->assertSame(2, $dao->hookCalls);
+        $this->assertSame($uuid, $dao->hookDomain?->uuid);
+        $this->assertSame('after', $dao->hookDomain?->user_name);
+    }
 }
 
 class CachedUserDao
@@ -299,5 +322,38 @@ class CachedUserDomain
         public readonly int $age,
         public readonly int $status,
         public readonly string $created_at,
+    ) {}
+}
+
+class UuidUserDao
+{
+    use CachedDao;
+
+    protected string $table = 'uuid_users';
+    protected string $idColumn = 'uuid';
+    protected string $domainClass = UuidUserDomain::class;
+
+    public int $hookCalls = 0;
+    public ?UuidUserDomain $hookDomain = null;
+
+    public function __construct(PDO $pdo, LoggerInterface $logger, CacheInterface $cache)
+    {
+        $this->initCachedDao($pdo, $logger, $cache);
+    }
+
+    protected function deleteCacheFor(?object $domain): void
+    {
+        $this->hookCalls++;
+        $this->hookDomain = $domain;
+    }
+}
+
+class UuidUserDomain
+{
+    use DataAccess;
+
+    public function __construct(
+        public readonly string $uuid,
+        public readonly string $user_name,
     ) {}
 }

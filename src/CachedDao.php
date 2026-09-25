@@ -173,7 +173,7 @@ trait CachedDao
 
         $affected = $data === [] ? 0 : $this->rawUpdate($data + [$this->idColumn => $id]);
         try {
-            $this->cacheRemove((int) $id);
+            $this->cacheRemove($id);
         } catch (\Throwable $e) {
         }
         return $affected;
