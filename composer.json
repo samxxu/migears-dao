@@ -12,7 +12,8 @@
         "migears/cache": "^2.0"
     },
     "require-dev": {
-        "phpunit/phpunit": "^10"
+        "phpunit/phpunit": "^10",
+        "phpstan/phpstan": "^2.2"
     },
     "autoload": {
         "psr-4": {
@@ -44,6 +45,7 @@
     },
     "version": "2.0.0",
     "scripts": {
-        "test": "phpunit"
+        "test": "phpunit",
+        "analyse": "phpstan analyse"
     }
 }

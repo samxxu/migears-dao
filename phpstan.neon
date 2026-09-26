@@ -1,0 +1,10 @@
+parameters:
+    level: 6
+    paths:
+        - src
+    ignoreErrors:
+        # This trait IS the module's deliverable: application code and the test
+        # fixtures consume it, and both live outside the analysed paths. PHPStan
+        # only sees a trait as "used" when a class inside `paths` uses it, so this
+        # one rule is suppressed here rather than dragging the whole tests/ tree in.
+        - identifier: trait.unused
