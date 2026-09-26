@@ -150,7 +150,7 @@ $page  = $cachedDao->paginate(1, 20);     // ['records' => UserDomain[], 'total'
 
 Write operations (`insert` / `update` / `delete`) automatically invalidate
 the primary-key cache entry. To clear additional cache keys (e.g. lookups
-by secondary indexes like `byOpenId`), override the `deleteCacheFor()` hook:
+by secondary indexes like `byEmail`), override the `deleteCacheFor()` hook:
 
 ```php
 class UserDao
@@ -164,7 +164,7 @@ class UserDao
     protected function deleteCacheFor(?object $user): void
     {
         if ($user !== null) {
-            $this->cache->delete('user_by_openid_' . $user->open_id);
+            $this->cache->delete('user_by_email_' . $user->email);
         }
     }
 }
@@ -218,21 +218,16 @@ named arguments bind each value to the declared constructor type, so a missing
 key, an extra key, or a type mismatch throws a native `\Error` / `\TypeError`
 (see migears/domain "Type Contract").
 
-This makes the **DAO the enforcement point for native types**. Between the SQL
-result and the Domain constructor, the DAO must guarantee every value already
-carries its native PHP type:
+The DAO adds **no casting of its own** — no column-type map, no `intval()`.
+Native types come from PDO itself: since PHP 8.1 it returns real `int` / `float`
+for numeric columns, under both emulated and native prepares. So an `int` column
+arrives as a genuine PHP `int` and a nullable column as `null`, with no
+normalizing step in this layer. The SQL layer likewise only executes queries and
+returns raw arrays.
 
-- `int` columns arrive as a real PHP `int`, not the string `'42'`
-- `bool` columns as `true` / `false`, not `'1'` / `'0'`
-- nullable columns as `null` when empty
-
-Either configure PDO to return native types (e.g. `PDO::ATTR_EMULATE_PREPARES
-=> false` with a driver that infers column types), or cast explicitly inside the
-DAO method before handing the row to `fromArray()`.
-
-The SQL layer only executes queries and returns raw arrays — normalizing result
-types is owned here, in the DAO. (The same holds for `SingleTableDao`, where
-the row travels up to `fromArray()` in the caller.)
+See migears/domain "Type Contract" for the caveats (`DECIMAL` stays `string`,
+`TINYINT(1)` is `int`, never enable `PDO::ATTR_STRINGIFY_FETCHES`) and why the
+strict binding is deliberate rather than something to paper over with casts.
 
 ## Architecture
 
@@ -411,7 +406,7 @@ $page  = $cachedDao->paginate(1, 20);     // ['records' => UserDomain[], 'total'
 ```
 
 写操作（`insert` / `update` / `delete`）会自动失效主键缓存。如需清理
-额外的缓存键（例如按二级索引查找的 `byOpenId`），重写 `deleteCacheFor()`
+额外的缓存键（例如按二级索引查找的 `byEmail`），重写 `deleteCacheFor()`
 钩子即可：
 
 ```php
@@ -426,7 +421,7 @@ class UserDao
     protected function deleteCacheFor(?object $user): void
     {
         if ($user !== null) {
-            $this->cache->delete('user_by_openid_' . $user->open_id);
+            $this->cache->delete('user_by_email_' . $user->email);
         }
     }
 }
@@ -478,18 +473,14 @@ hydration 魔法。Domain 层**零类型转换**：PHP 8.x 强类型命名参数
 构造声明的类型，缺键、多键或类型不匹配都会抛原生 `\Error` / `\TypeError`
 （参见 migears/domain「类型契约」）。
 
-因此 **DAO 是原生类型的履约点**。在 SQL 结果与 Domain 构造函数之间，DAO 必须
-保证每个值已是原生 PHP 类型：
+DAO 自身**不做任何 cast** — 没有列类型映射，也没有 `intval()`。原生类型来自
+PDO 本身：PHP 8.1 起，数字列在结果集中即返回真正的 `int` / `float`，模拟预处理
+与原生预处理皆然。因此 `int` 列到达时就是真正的 PHP `int`，可空列为空时就是
+`null`，本层无需任何归一化步骤。SQL 层同样只负责执行查询并返回原始数组。
 
-- `int` 列是真正的 PHP `int`，而非字符串 `'42'`
-- `bool` 列是 `true` / `false`，而非 `'1'` / `'0'`
-- 可空列为空时是 `null`
-
-要么配置 PDO 返回原生类型（如 `PDO::ATTR_EMULATE_PREPARES => false` 且驱动能
-推断列类型），要么在 DAO 方法内、把行交给 `fromArray()` 之前显式 cast。
-
-SQL 层只负责执行查询并返回原始数组 — 结果类型归一化统一收口在 DAO 层。
-（`SingleTableDao` 同样如此，只是该行会向上传递到调用方再进 `fromArray()`。）
+关于注意事项（`DECIMAL` 保持 `string`、`TINYINT(1)` 是 `int`、切勿开启
+`PDO::ATTR_STRINGIFY_FETCHES`），以及强类型绑定为何是刻意设计而非需要用 cast
+抹平的东西，参见 migears/domain「类型契约」。
 
 ## 架构
 

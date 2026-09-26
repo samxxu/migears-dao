@@ -18,7 +18,7 @@ use MiGears\Sql\Exception\RecordNotFoundException;
  *     then hydrate the row into a Domain object via $domainClass::fromArray()
  *   - insert / update / delete invalidate the primary-key cache automatically
  *   - subclasses may override deleteCacheFor() to clear extra cache keys
- *     (e.g. byOpenId / byNonstandard) that reference the same Domain
+ *     (e.g. byEmail / bySku) that reference the same Domain
  *
  * The using class must declare $table, $idColumn and $domainClass:
  *
