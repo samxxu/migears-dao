@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace MiGears\Dao\Tests;
 
 use PDO;
+use Psr\Log\AbstractLogger;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 use PHPUnit\Framework\TestCase;
@@ -272,6 +273,157 @@ class CachedDaoTest extends TestCase
         $this->assertSame($uuid, $dao->hookDomain?->uuid);
         $this->assertSame('after', $dao->hookDomain?->user_name);
     }
+
+    public function testGetByIdsDoesNotDuplicateRowForNonCanonicalNumericId(): void
+    {
+        // '01' is not a canonical numeric string, so PHP keeps it as a string
+        // array key while the database hands the primary key back as an int.
+        // Keying cache hits by the requested value therefore put the same row
+        // into the result twice.
+        $this->dao->getById('01'); // warms the users_1 cache entry (id normalised)
+        $this->assertTrue($this->cache->has('users_1'));
+
+        $users = $this->dao->getByIds(['01', 1]);
+
+        $this->assertCount(1, $users);
+        $this->assertArrayHasKey(1, $users);
+        $this->assertSame('Alice', $users[1]->user_name);
+    }
+
+    public function testPrimaryKeyReadsUseCacheButGetAllCountPaginateDoNot(): void
+    {
+        $cache = new ArrayCache();
+        $dao = new CachedUserDao($this->pdo, new NullLogger(), $cache);
+
+        $dao->getAll();
+        $dao->count();
+        $dao->paginate(1, 2);
+
+        // Only primary-key lookups populate the cache; the other reads always
+        // hit the database (the README states exactly this).
+        $this->assertFalse($cache->has('users_1'));
+        $this->assertFalse($cache->has('users_2'));
+        $this->assertFalse($cache->has('users_3'));
+    }
+
+    public function testUninitializedCacheThrowsSqlException(): void
+    {
+        $this->expectException(SqlException::class);
+
+        $dao = new class {
+            use CachedDao;
+
+            protected string $table = 'users';
+            protected string $idColumn = 'id';
+            protected string $domainClass = CachedUserDomain::class;
+        };
+
+        $dao->getById(1);
+    }
+
+    public function testInitCachedDaoWithoutDomainClassThrows(): void
+    {
+        $this->expectException(SqlException::class);
+
+        new class($this->pdo, new NullLogger(), new ArrayCache()) {
+            use CachedDao;
+
+            protected string $table = 'users';
+            protected string $idColumn = 'id';
+
+            public function __construct(PDO $pdo, LoggerInterface $logger, CacheInterface $cache)
+            {
+                $this->initCachedDao($pdo, $logger, $cache);
+            }
+        };
+    }
+
+    public function testInsertWithDefaultHookSkipsReadBack(): void
+    {
+        $pdo = $this->makeCountingPdo();
+        $dao = new CachedUserDao($pdo, new NullLogger(), new ArrayCache());
+
+        $before = $pdo->prepares;
+        $dao->insert(['user_name' => 'Dave', 'email' => 'dave@example.com', 'age' => 30, 'status' => 1]);
+
+        // INSERT only — the default deleteCacheFor() is a no-op, so the
+        // read-back SELECT that feeds the hook must be skipped.
+        $this->assertSame(1, $pdo->prepares - $before);
+    }
+
+    public function testInsertWithOverriddenHookReadsBack(): void
+    {
+        $pdo = $this->makeCountingPdo();
+        $dao = new HookUserDao($pdo, new NullLogger(), new ArrayCache());
+
+        $before = $pdo->prepares;
+        $dao->insert(['user_name' => 'Dave', 'email' => 'dave@example.com', 'age' => 30, 'status' => 1]);
+
+        // INSERT + the read-back SELECT handed to the overridden hook.
+        $this->assertSame(2, $pdo->prepares - $before);
+    }
+
+    public function testCacheFailureIsLogged(): void
+    {
+        $flakyCache = $this->createMock(CacheInterface::class);
+        $flakyCache->method('get')->willReturn(null);
+        $flakyCache->method('delete')->willThrowException(new \RuntimeException('cache down'));
+        $flakyCache->method('set')->willReturn(true);
+
+        $logger = new CapturingLogger();
+        $dao = new CachedUserDao($this->pdo, $logger, $flakyCache);
+
+        // The write still succeeds; the failure is swallowed but logged.
+        $this->assertSame(1, $dao->delete(1));
+
+        $warnings = array_values(array_filter(
+            $logger->records,
+            static fn(array $record): bool => $record['level'] === 'warning'
+        ));
+        $this->assertCount(1, $warnings);
+        $this->assertSame('cache down', $warnings[0]['context']['exception']->getMessage());
+    }
+
+    public function testGetByIdNormalizesNumericCacheKey(): void
+    {
+        $this->dao->getById('01');
+
+        $this->assertTrue($this->cache->has('users_1'));
+        $this->assertFalse($this->cache->has('users_01'));
+
+        // The int form shares the key, so it is served from the cache.
+        $this->assertSame('Alice', $this->dao->getById(1)->user_name);
+    }
+
+    public function testGetByIdInvalidationCoversNonCanonicalNumericKey(): void
+    {
+        $this->dao->getById('01');
+        $this->assertTrue($this->cache->has('users_1'));
+
+        $this->dao->update(['id' => 1, 'user_name' => 'Alice Updated']);
+
+        $this->assertFalse($this->cache->has('users_1'));
+        $this->assertSame('Alice Updated', $this->dao->getById('01')->user_name);
+    }
+
+    private function makeCountingPdo(): CountingPdo
+    {
+        $pdo = new CountingPdo('sqlite::memory:');
+        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+        $pdo->exec(<<<'SQL'
+            CREATE TABLE users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_name VARCHAR(100) NOT NULL,
+                email VARCHAR(100) NOT NULL,
+                age INTEGER DEFAULT 0,
+                status INTEGER DEFAULT 1,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        SQL);
+
+        return $pdo;
+    }
 }
 
 class CachedUserDao
@@ -356,4 +508,26 @@ class UuidUserDomain
         public readonly string $uuid,
         public readonly string $user_name,
     ) {}
+}
+
+class CountingPdo extends PDO
+{
+    public int $prepares = 0;
+
+    public function prepare(string $query, array $options = []): \PDOStatement|false
+    {
+        $this->prepares++;
+        return parent::prepare($query, $options);
+    }
+}
+
+class CapturingLogger extends AbstractLogger
+{
+    /** @var list<array{level: mixed, message: string, context: array<string, mixed>}> */
+    public array $records = [];
+
+    public function log($level, string|\Stringable $message, array $context = []): void
+    {
+        $this->records[] = ['level' => $level, 'message' => (string) $message, 'context' => $context];
+    }
 }
