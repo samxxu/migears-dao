@@ -22,6 +22,11 @@ use MiGears\Sql\Exception\SqlException;
  *
  *       protected string $table = 'users';
  *       protected string $idColumn = 'id';
+ *
+ *       public function __construct(PDO $pdo, LoggerInterface $logger)
+ *       {
+ *           $this->initDao($pdo, $logger);
+ *       }
  *   }
  *
  *   $dao = new UserDao($pdo, $logger);

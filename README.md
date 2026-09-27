@@ -12,7 +12,7 @@ Minimalist DAO layer — connects SQL and Domain with zero abstraction.
 
 - **No generic CRUD base class** — `SingleTableDao` is a trait, not a base class
 - **Direct SQL in each method** — no magic, no auto-generated queries
-- **Direct `new Domain(...$row)`** — no intermediate hydrator or mapper
+- **Direct hydration via `Domain::fromArray()`** — no intermediate hydrator or mapper
 - **`toArray()` for persistence** — Domain → array → SQL
 - **One DAO per table** — simple and predictable
 
@@ -22,7 +22,7 @@ Minimalist DAO layer — connects SQL and Domain with zero abstraction.
 composer require migears/dao
 ```
 
-Requires: PHP 8.1+, `migears/sql`.
+Requires: PHP 8.1+, ext-pdo, `psr/log`, `migears/sql`, `migears/domain`, `migears/cache`.
 
 ## Constructor Contract
 
@@ -137,8 +137,9 @@ $dao->update($user->toArray());
 
 ### Using CachedDao
 
-`CachedDao` wraps every read method with a cache layer and returns
-**hydrated Domain objects** instead of raw arrays:
+`CachedDao` caches primary-key lookups (`getById` / `getByIds`) and returns
+**hydrated Domain objects** instead of raw arrays. `getAll()`, `count()` and
+`paginate()` always query the database — only the primary-key reads are cached.
 
 ```php
 $user  = $cachedDao->getById(1);          // ?UserDomain
@@ -269,7 +270,7 @@ MIT
 
 - **不封装通用 CRUD 基类** — `SingleTableDao` 是 trait，不是基类
 - **每个方法直接写 SQL** — 没有魔法，没有自动生成查询
-- **直接 `new Domain(...$row)`** — 不经过任何中间 hydrator 或 mapper
+- **通过 `Domain::fromArray()` 直接 hydrate** — 不经过任何中间 hydrator 或 mapper
 - **`toArray()` 用于持久化** — Domain → 数组 → SQL
 - **一个 DAO 对应一张表** — 简单可预测
 
@@ -279,7 +280,7 @@ MIT
 composer require migears/dao
 ```
 
-要求：PHP 8.1+，`migears/sql`。
+要求：PHP 8.1+、ext-pdo、`psr/log`、`migears/sql`、`migears/domain`、`migears/cache`。
 
 ## 构造契约
 
@@ -394,8 +395,9 @@ $dao->update($user->toArray());
 
 ### 使用 CachedDao
 
-`CachedDao` 为所有读方法加上缓存层，并返回**已 hydrate 的 Domain 对象**
-而非原始数组：
+`CachedDao` 为按主键的读取（`getById` / `getByIds`）加上缓存层，并返回
+**已 hydrate 的 Domain 对象**而非原始数组。`getAll()`、`count()` 与
+`paginate()` 始终查询数据库——只有按主键的读取走缓存。
 
 ```php
 $user  = $cachedDao->getById(1);          // ?UserDomain
