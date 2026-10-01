@@ -17,11 +17,11 @@ Legend — **P0** functional or security · **P1** documentation that fails when
 
 | | |
 |---|---|
-| Unsettled | P0 0 · P1 0 · P2 2 · P3 1 · other 1 |
-| Settled | 7 of 11 |
-| Waiting on the owner | `P2-5`, `P2-6`, `P3-3` |
-| Waiting on the reviewer | `G2` |
+| Unsettled | P0 0 · P1 0 · P2 2 · P3 1 · other 0 |
+| Settled | 8 of 11 |
+| Waiting on the owner | `P2-6`, `P3-3` |
 | Waiting on the coordinator | _nothing_ |
+| Waiting on the reviewer | `P2-5` |
 | Deferred, owing nobody | _nothing_ |
 
 | id | level | status | title |
@@ -31,12 +31,12 @@ Legend — **P0** functional or security · **P1** documentation that fails when
 | [`P2-2`](issues/P2-2.md) | P2 | **verified** | Both class docblock examples omit the constructor and the … |
 | [`P2-3`](issues/P2-3.md) | P2 | **verified** | `$cache` has no initialisation guard (asymmetric with … |
 | [`P2-4`](issues/P2-4.md) | P2 | **verified** | `initCachedDao()` validates only `$table` and `$idColumn`, skipping the … |
-| [`P2-5`](issues/P2-5.md) | P2 | **open** | `domainId()` read the primary key with `get_object_vars()`, evaluated … |
+| [`P2-5`](issues/P2-5.md) | P2 | **fixed** | `domainId()` read the primary key with `get_object_vars()`, evaluated … |
 | [`P2-6`](issues/P2-6.md) | P2 | **open** | Cache-failure handling was asymmetric. Writes wrapped `cacheRemove()` … |
 | [`P3-1`](issues/P3-1.md) | P3 | **verified** | The README 'Requires' line lists only PHP and `migears/sql` while … |
 | [`P3-2`](issues/P3-2.md) | P3 | **verified** | Cache keys are not normalised per instance: `getById('01')` writes key … |
 | [`P3-3`](issues/P3-3.md) | P3 | **open** | The `### Using CachedDao` example presented `class UserDao { use … |
-| [`G2`](issues/G2.md) | - | **fixed** | Strict flags: `phpunit.xml.dist` currently sets none of the five. The … |
+| [`G2`](issues/G2.md) | - | **verified** | Strict flags: `phpunit.xml.dist` currently sets none of the five. The … |
 
 ## Unclosed
 
@@ -45,16 +45,15 @@ highest severity first. `waiting on` is the party who acts next, read from that 
 
 | | |
 |---|---|
-| Unclosed | **4** of 11 |
-| By status | `open` 3 · `fixed` 1 |
-| Waiting on | owner 3 · reviewer 1 |
+| Unclosed | **3** of 11 |
+| By status | `open` 2 · `fixed` 1 |
+| Waiting on | owner 2 · reviewer 1 |
 
 | level | item | status | waiting on | title |
 |---|---|---|---|---|
-| **P2** | [`P2-5`](issues/P2-5.md) | `open` | owner | `domainId()` read the primary key with `get_object_vars()`, evaluated … |
+| **P2** | [`P2-5`](issues/P2-5.md) | `fixed` | reviewer | `domainId()` read the primary key with `get_object_vars()`, evaluated … |
 | **P2** | [`P2-6`](issues/P2-6.md) | `open` | owner | Cache-failure handling was asymmetric. Writes wrapped `cacheRemove()` … |
 | **P3** | [`P3-3`](issues/P3-3.md) | `open` | owner | The `### Using CachedDao` example presented `class UserDao { use … |
-| **-** | [`G2`](issues/G2.md) | `fixed` | reviewer | Strict flags: `phpunit.xml.dist` currently sets none of the five. The … |
 
 ## Verdict
 
@@ -95,11 +94,11 @@ No test for cache invalidation failure (logger warning path); no test for delete
 
 | | |
 |---|---|
-| 未了结 | P0 0 · P1 0 · P2 2 · P3 1 · 其他 1 |
-| 已了结 | 7 / 11 |
-| 等负责人 | `P2-5`, `P2-6`, `P3-3` |
-| 等评审方 | `G2` |
+| 未了结 | P0 0 · P1 0 · P2 2 · P3 1 · 其他 0 |
+| 已了结 | 8 / 11 |
+| 等模块主 | `P2-6`, `P3-3` |
 | 等协调人 | _无_ |
+| 等评审方 | `P2-5` |
 | 已暂缓，不欠谁 | _无_ |
 
 | id | 级别 | 状态 | 标题 |
@@ -109,12 +108,12 @@ No test for cache invalidation failure (logger warning path); no test for delete
 | [`P2-2`](issues/P2-2.md) | P2 | **verified** | 两个类的 docblock 示例都缺构造器与 initDao()/initCachedDao() 调用，照抄即抛错；README 仍写 new … |
 | [`P2-3`](issues/P2-3.md) | P2 | **verified** | $cache 缺初始化守卫（与 SingleTableDao::sql() 不对称）：未初始化即用会得到 Typed property … |
 | [`P2-4`](issues/P2-4.md) | P2 | **verified** | initCachedDao() 只校验 $table 与 $idColumn，漏掉 docblock 声明为必需的 … |
-| [`P2-5`](issues/P2-5.md) | P2 | **open** | `domainId()` 用 `get_object_vars()` 读主键，而该函数在 DAO 作用域内取值，因此只看得见 public … |
+| [`P2-5`](issues/P2-5.md) | P2 | **fixed** | `domainId()` 用 `get_object_vars()` 读主键，而该函数在 DAO 作用域内取值，因此只看得见 public … |
 | [`P2-6`](issues/P2-6.md) | P2 | **open** | 缓存失败处理不对称。写路径把 `cacheRemove()` 包在 `try/catch (\Throwable)` 里并记 … |
 | [`P3-1`](issues/P3-1.md) | P3 | **verified** | README 的 Requires 只列 PHP 与 migears/sql，而 composer 实际 require … |
 | [`P3-2`](issues/P3-2.md) | P3 | **verified** | 缓存键未按实例归一：getById("01") 写 users_01，getById(1) 写 users_1，同一行会被缓存两份——正是 … |
 | [`P3-3`](issues/P3-3.md) | P3 | **open** | `### 使用 CachedDao` 示例以 `class UserDao { use CachedDao; … }` … |
-| [`G2`](issues/G2.md) | - | **fixed** | 严格开关：`phpunit.xml.dist` … |
+| [`G2`](issues/G2.md) | - | **verified** | 严格开关：`phpunit.xml.dist` … |
 
 ## 未关闭
 
@@ -123,16 +122,15 @@ No test for cache invalidation failure (logger warning path); no test for delete
 
 | | |
 |---|---|
-| 未关闭 | **4** / 11 |
-| 按状态 | `open` 3 · `fixed` 1 |
-| 等在谁 | 负责人 3 · 评审方 1 |
+| 未关闭 | **3** / 11 |
+| 按状态 | `open` 2 · `fixed` 1 |
+| 等在谁 | 模块主 2 · 评审方 1 |
 
 | 级别 | 条目 | 状态 | 等在谁 | 标题 |
 |---|---|---|---|---|
-| **P2** | [`P2-5`](issues/P2-5.md) | `open` | 负责人 | `domainId()` 用 `get_object_vars()` 读主键，而该函数在 DAO 作用域内取值，因此只看得见 public … |
-| **P2** | [`P2-6`](issues/P2-6.md) | `open` | 负责人 | 缓存失败处理不对称。写路径把 `cacheRemove()` 包在 `try/catch (\Throwable)` 里并记 … |
-| **P3** | [`P3-3`](issues/P3-3.md) | `open` | 负责人 | `### 使用 CachedDao` 示例以 `class UserDao { use CachedDao; … }` … |
-| **-** | [`G2`](issues/G2.md) | `fixed` | 评审方 | 严格开关：`phpunit.xml.dist` … |
+| **P2** | [`P2-5`](issues/P2-5.md) | `fixed` | 评审方 | `domainId()` 用 `get_object_vars()` 读主键，而该函数在 DAO 作用域内取值，因此只看得见 public … |
+| **P2** | [`P2-6`](issues/P2-6.md) | `open` | 模块主 | 缓存失败处理不对称。写路径把 `cacheRemove()` 包在 `try/catch (\Throwable)` 里并记 … |
+| **P3** | [`P3-3`](issues/P3-3.md) | `open` | 模块主 | `### 使用 CachedDao` 示例以 `class UserDao { use CachedDao; … }` … |
 
 ## 结论
 
