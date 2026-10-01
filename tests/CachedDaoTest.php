@@ -50,7 +50,7 @@ class CachedDaoTest extends TestCase
             $stmt->execute($user);
         }
 
-        $this->cache = new ArrayCache();
+        $this->cache = new ArrayCache(new NullLogger());
         $this->dao = new CachedUserDao($this->pdo, new NullLogger(), $this->cache);
     }
 
@@ -292,7 +292,7 @@ class CachedDaoTest extends TestCase
 
     public function testPrimaryKeyReadsUseCacheButGetAllCountPaginateDoNot(): void
     {
-        $cache = new ArrayCache();
+        $cache = new ArrayCache(new NullLogger());
         $dao = new CachedUserDao($this->pdo, new NullLogger(), $cache);
 
         $dao->getAll();
@@ -325,7 +325,7 @@ class CachedDaoTest extends TestCase
     {
         $this->expectException(SqlException::class);
 
-        new class($this->pdo, new NullLogger(), new ArrayCache()) {
+        new class($this->pdo, new NullLogger(), new ArrayCache(new NullLogger())) {
             use CachedDao;
 
             protected string $table = 'users';
@@ -341,7 +341,7 @@ class CachedDaoTest extends TestCase
     public function testInsertWithDefaultHookSkipsReadBack(): void
     {
         $pdo = $this->makeCountingPdo();
-        $dao = new CachedUserDao($pdo, new NullLogger(), new ArrayCache());
+        $dao = new CachedUserDao($pdo, new NullLogger(), new ArrayCache(new NullLogger()));
 
         $before = $pdo->prepares;
         $dao->insert(['user_name' => 'Dave', 'email' => 'dave@example.com', 'age' => 30, 'status' => 1]);
@@ -354,7 +354,7 @@ class CachedDaoTest extends TestCase
     public function testInsertWithOverriddenHookReadsBack(): void
     {
         $pdo = $this->makeCountingPdo();
-        $dao = new HookUserDao($pdo, new NullLogger(), new ArrayCache());
+        $dao = new HookUserDao($pdo, new NullLogger(), new ArrayCache(new NullLogger()));
 
         $before = $pdo->prepares;
         $dao->insert(['user_name' => 'Dave', 'email' => 'dave@example.com', 'age' => 30, 'status' => 1]);
@@ -404,6 +404,133 @@ class CachedDaoTest extends TestCase
 
         $this->assertFalse($this->cache->has('users_1'));
         $this->assertSame('Alice Updated', $this->dao->getById('01')->user_name);
+    }
+
+    /**
+     * Equivalent spellings of the same numeric primary key must collapse onto
+     * one cache key, or a write clears a key no read ever used.
+     *
+     * @dataProvider nonCanonicalIntegerIds
+     */
+    public function testGetByIdNormalisesEquivalentNumericSpellings(string $spelling): void
+    {
+        $this->dao->getById($spelling);
+
+        // '+1', ' 1' and '1.0' all address row 1 and share its canonical key.
+        $this->assertTrue($this->cache->has('users_1'));
+        $this->assertFalse($this->cache->has('users_' . $spelling));
+
+        // A canonical write therefore invalidates what the spelling reads.
+        $this->dao->update(['id' => 1, 'user_name' => 'Alice Updated']);
+        $this->assertSame('Alice Updated', $this->dao->getById($spelling)->user_name);
+    }
+
+    /** @return list<array{string}> */
+    public static function nonCanonicalIntegerIds(): array
+    {
+        return [['+1'], [' 1'], ['1.0']];
+    }
+
+    public function testGetByIdsIndexesCacheHitsByDomainIdWhenPrimaryKeyIsNotPublic(): void
+    {
+        $dao = new HiddenIdUserDao($this->pdo, new NullLogger(), $this->cache);
+
+        // Warm row 1, then request it through two spellings of the same key.
+        // Both are cache hits, so the result must be keyed by the Domain's own
+        // primary key — not by the requested spelling. get_object_vars() from
+        // the trait's scope cannot see a non-public key and would key the same
+        // row twice.
+        $dao->getById(1);
+
+        $users = $dao->getByIds(['01', 1]);
+
+        $this->assertCount(1, $users);
+        $this->assertArrayHasKey(1, $users);
+        $this->assertSame('Alice', $users[1]->user_name);
+    }
+
+    public function testCacheReadFailureOnGetByIdFallsBackToDatabaseAndIsLogged(): void
+    {
+        $flakyCache = $this->createMock(CacheInterface::class);
+        $flakyCache->method('get')->willThrowException(new \RuntimeException('cache read down'));
+        $flakyCache->method('set')->willReturn(true);
+
+        $logger = new CapturingLogger();
+        $dao = new CachedUserDao($this->pdo, $logger, $flakyCache);
+
+        $user = $dao->getById(1);
+        $this->assertInstanceOf(CachedUserDomain::class, $user);
+        $this->assertSame('Alice', $user->user_name);
+
+        $warnings = array_values(array_filter(
+            $logger->records,
+            static fn(array $record): bool => $record['level'] === 'warning'
+        ));
+        $this->assertCount(1, $warnings);
+        $this->assertSame('cache read down', $warnings[0]['context']['exception']->getMessage());
+    }
+
+    public function testCacheWriteFailureOnGetByIdFallsBackToDatabaseAndIsLogged(): void
+    {
+        $flakyCache = $this->createMock(CacheInterface::class);
+        $flakyCache->method('get')->willReturn(null);
+        $flakyCache->method('set')->willThrowException(new \RuntimeException('cache write down'));
+
+        $logger = new CapturingLogger();
+        $dao = new CachedUserDao($this->pdo, $logger, $flakyCache);
+
+        $this->assertSame('Alice', $dao->getById(1)->user_name);
+
+        $warnings = array_values(array_filter(
+            $logger->records,
+            static fn(array $record): bool => $record['level'] === 'warning'
+        ));
+        $this->assertCount(1, $warnings);
+        $this->assertSame('cache write down', $warnings[0]['context']['exception']->getMessage());
+    }
+
+    public function testCacheFailureOnGetByIdsFallsBackToDatabase(): void
+    {
+        $flakyCache = $this->createMock(CacheInterface::class);
+        $flakyCache->method('get')->willThrowException(new \RuntimeException('cache down'));
+        $flakyCache->method('set')->willThrowException(new \RuntimeException('cache down'));
+
+        $dao = new CachedUserDao($this->pdo, new NullLogger(), $flakyCache);
+
+        $users = $dao->getByIds([1, 3]);
+
+        $this->assertCount(2, $users);
+        $this->assertSame('Alice', $users[1]->user_name);
+        $this->assertSame('Charlie', $users[3]->user_name);
+    }
+
+    /**
+     * The README's "Using CachedDao" example must be copyable: without the
+     * constructor and initCachedDao() the DAO stays uninitialised.
+     *
+     * @dataProvider readmeCachedDaoSections
+     */
+    public function testReadmeCachedDaoExampleIncludesConstructor(string $header): void
+    {
+        $readme = (string) file_get_contents(__DIR__ . '/../README.md');
+
+        $start = strpos($readme, $header);
+        $this->assertNotFalse($start, "README is missing the section: {$header}");
+
+        $section = substr($readme, $start);
+        $end = strpos($section, "\n## ");
+        if ($end !== false) {
+            $section = substr($section, 0, $end);
+        }
+
+        $this->assertStringContainsString('public function __construct(', $section);
+        $this->assertStringContainsString('initCachedDao($pdo, $logger, $cache);', $section);
+    }
+
+    /** @return list<array{string}> */
+    public static function readmeCachedDaoSections(): array
+    {
+        return [['### Using CachedDao'], ['### 使用 CachedDao']];
     }
 
     private function makeCountingPdo(): CountingPdo
@@ -508,6 +635,39 @@ class UuidUserDomain
         public readonly string $uuid,
         public readonly string $user_name,
     ) {}
+}
+
+/**
+ * A Domain whose primary key is deliberately non-public: the DAO must still be
+ * able to read it to index cache hits, without any get_object_vars() from the
+ * trait's scope and without a public accessor.
+ */
+class HiddenIdUserDomain
+{
+    use DataAccess;
+
+    public function __construct(
+        private readonly int $id,
+        public readonly string $user_name,
+        public readonly string $email,
+        public readonly int $age,
+        public readonly int $status,
+        public readonly string $created_at,
+    ) {}
+}
+
+class HiddenIdUserDao
+{
+    use CachedDao;
+
+    protected string $table = 'users';
+    protected string $idColumn = 'id';
+    protected string $domainClass = HiddenIdUserDomain::class;
+
+    public function __construct(PDO $pdo, LoggerInterface $logger, CacheInterface $cache)
+    {
+        $this->initCachedDao($pdo, $logger, $cache);
+    }
 }
 
 class CountingPdo extends PDO

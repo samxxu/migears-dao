@@ -86,14 +86,25 @@ trait CachedDao
     }
 
     /**
-     * A numeric primary key reaches the DAO either as an int or as a string
-     * ('1', '01'). The database always returns the canonical integer, so both
-     * address the same row and must share one cache key; otherwise the row is
-     * cached twice and invalidating one key leaves the other stale.
+     * A numeric primary key reaches the DAO either as an int or as a string,
+     * and the string spelling is not canonical: '1', '01', '+1', ' 1' and
+     * '1.0' all address the same row. The database always returns the
+     * canonical integer, so every equivalent spelling must share one cache
+     * key; otherwise the row is cached twice and invalidating one key leaves
+     * the other stale. A string with a real fractional part ('1.5') or a
+     * non-numeric key (a UUID) is left untouched.
      */
     private function normalizeId(string|int $id): string|int
     {
-        return is_string($id) && ctype_digit($id) ? (int) $id : $id;
+        if (!is_string($id)) {
+            return $id;
+        }
+
+        $trimmed = trim($id);
+        if (preg_match('/^[+-]?(\d+)(?:\.0+)?$/', $trimmed, $matches) === 1) {
+            return (int) $matches[1];
+        }
+        return $id;
     }
 
     protected function hydrate(array $row): object
@@ -108,16 +119,36 @@ trait CachedDao
      * strings such as '01': PHP keeps '01' as a string array key, while the
      * database returns the primary key as an int — the same row then lands in
      * the result twice.
+     *
+     * Reflection rather than get_object_vars(): the latter is called from this
+     * trait's scope, so it only sees the Domain's public properties, and a
+     * Domain that keeps its primary key non-public would yield null and put
+     * the duplicate back. Reflection also leaves the public contract alone — a
+     * Domain needs no accessor for the DAO to find its key — and mirrors the
+     * ReflectionMethod use in deleteCacheForIsOverridden().
      */
     private function domainId(object $domain): int|string|null
     {
-        $value = get_object_vars($domain)[$this->idColumn] ?? null;
+        if (!property_exists($domain, $this->idColumn)) {
+            return null;
+        }
+
+        static $properties = [];
+        $property = $properties[$domain::class . ':' . $this->idColumn]
+            ??= new \ReflectionProperty($domain, $this->idColumn);
+        $value = $property->getValue($domain);
         return is_int($value) || is_string($value) ? $value : null;
     }
 
     public function getById(int|string $id): ?object
     {
-        $cached = $this->cache()->get($this->cacheKey($this->table, $id));
+        $cache = $this->cache();
+        try {
+            $cached = $cache->get($this->cacheKey($this->table, $id));
+        } catch (\Throwable $e) {
+            $this->logger?->warning('CachedDao: cache read failed; falling back to database', ['exception' => $e]);
+            $cached = null;
+        }
         if (is_object($cached)) {
             return $cached;
         }
@@ -128,7 +159,11 @@ trait CachedDao
         }
 
         $domain = $this->hydrate($row);
-        $this->cache()->set($this->cacheKey($this->table, $id), $domain);
+        try {
+            $cache->set($this->cacheKey($this->table, $id), $domain);
+        } catch (\Throwable $e) {
+            $this->logger?->warning('CachedDao: cache write failed', ['exception' => $e]);
+        }
         return $domain;
     }
 
@@ -157,10 +192,16 @@ trait CachedDao
             return [];
         }
 
+        $cache = $this->cache();
         $result = [];
         $missing = [];
         foreach ($ids as $id) {
-            $cached = $this->cache()->get($this->cacheKey($this->table, $id));
+            try {
+                $cached = $cache->get($this->cacheKey($this->table, $id));
+            } catch (\Throwable $e) {
+                $this->logger?->warning('CachedDao: cache read failed; falling back to database', ['exception' => $e]);
+                $cached = null;
+            }
             if (is_object($cached)) {
                 $result[$this->domainId($cached) ?? $id] = $cached;
             } else {
@@ -171,7 +212,11 @@ trait CachedDao
         if ($missing !== []) {
             foreach ($this->rawGetByIds($missing) as $id => $row) {
                 $domain = $this->hydrate($row);
-                $this->cache()->set($this->cacheKey($this->table, $id), $domain);
+                try {
+                    $cache->set($this->cacheKey($this->table, $id), $domain);
+                } catch (\Throwable $e) {
+                    $this->logger?->warning('CachedDao: cache write failed', ['exception' => $e]);
+                }
                 $result[$id] = $domain;
             }
         }

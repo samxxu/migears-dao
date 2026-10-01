@@ -16,6 +16,22 @@ Minimalist DAO layer — connects SQL and Domain with zero abstraction.
 - **`toArray()` for persistence** — Domain → array → SQL
 - **One DAO per table** — simple and predictable
 
+## Boundaries
+
+**In scope**
+
+- Single-table CRUD, delivered as a trait rather than a base class: `getById` / `getByIdOrFail` / `getByIds` / `getAll` / `count` / `paginate` / `insert` / `update` / `delete`, with a configurable `$idColumn` for a non-`id` primary key.
+- All data-access logic for one table, including complex joins and multi-table queries issued through the underlying `SqlBuilder` (`getSqlBuilder()`).
+- The cacheable variant `CachedDao`: caching primary-key reads (`getById` / `getByIds`), returning hydrated Domain objects, invalidating the primary-key cache automatically on writes, and exposing the `deleteCacheFor()` hook for extra keys.
+- Handing raw PDO rows straight to `Domain::fromArray()`, adding no casting of its own.
+
+**Not in scope (by design)**
+
+- Business logic, orchestration and the Service layer above the DAO — owned by `migears/manager`.
+- Building/executing SQL and talking to PDO — delegated to `migears/sql` (its `SqlBuilder`, `SqlException`, `RecordNotFoundException`).
+- Defining Domain objects and normalizing/casting column values — owned by `migears/domain`; the DAO deliberately performs no `intval()` or column-type mapping.
+- Cache backend implementations and storage (array / Redis) — owned by `migears/cache`; the DAO only depends on `CacheInterface`.
+
 ## Installation
 
 ```bash
@@ -162,6 +178,11 @@ class UserDao
     protected string $idColumn = 'id';
     protected string $domainClass = UserDomain::class;
 
+    public function __construct(PDO $pdo, LoggerInterface $logger, CacheInterface $cache)
+    {
+        $this->initCachedDao($pdo, $logger, $cache);
+    }
+
     protected function deleteCacheFor(?object $user): void
     {
         if ($user !== null) {
@@ -273,6 +294,22 @@ MIT
 - **通过 `Domain::fromArray()` 直接 hydrate** — 不经过任何中间 hydrator 或 mapper
 - **`toArray()` 用于持久化** — Domain → 数组 → SQL
 - **一个 DAO 对应一张表** — 简单可预测
+
+## 边界
+
+**范围内**
+
+- 以 trait 而非基类提供单表 CRUD：`getById` / `getByIdOrFail` / `getByIds` / `getAll` / `count` / `paginate` / `insert` / `update` / `delete`，并可用 `$idColumn` 配置非 `id` 主键。
+- 封装单表的全部数据访问逻辑，包括通过底层 `SqlBuilder`（`getSqlBuilder()`）编写的复杂关联查询与多表查询。
+- cacheable 变体 `CachedDao`：为按主键读取（`getById` / `getByIds`）加缓存、返回 hydrate 后的 Domain 对象、写操作自动失效主键缓存，并提供 `deleteCacheFor()` 钩子清理额外键。
+- 把 PDO 返回的原始行直接交给 `Domain::fromArray()`，自身不做任何 cast。
+
+**范围外（刻意不做）**
+
+- 业务逻辑、流程编排，以及 DAO 之上的 Service 层 —— 由 `migears/manager` 负责。
+- 拼接/执行 SQL 以及与 PDO 打交道 —— 交给 `migears/sql`（`SqlBuilder`、`SqlException`、`RecordNotFoundException`）。
+- 定义 Domain 对象、对列值做类型归一化/cast —— 由 `migears/domain` 负责；DAO 刻意不做 `intval()`，也不维护列类型映射。
+- 缓存后端的实现与存储（数组 / Redis）—— 由 `migears/cache` 负责；DAO 仅依赖 `CacheInterface`。
 
 ## 安装
 
@@ -419,6 +456,11 @@ class UserDao
     protected string $table = 'users';
     protected string $idColumn = 'id';
     protected string $domainClass = UserDomain::class;
+
+    public function __construct(PDO $pdo, LoggerInterface $logger, CacheInterface $cache)
+    {
+        $this->initCachedDao($pdo, $logger, $cache);
+    }
 
     protected function deleteCacheFor(?object $user): void
     {
