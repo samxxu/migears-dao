@@ -34,6 +34,12 @@ use MiGears\Sql\Exception\SqlException;
  *   $id  = $dao->insert($data);  // last insert id
  *   $n   = $dao->update($data);  // affected rows
  *   $n   = $dao->delete(1);      // affected rows
+ *
+ * Raw reads (getById / getByIds / getAll / paginate) return rows for
+ * table-level use. The Domain-oriented entry points are findById() (read a
+ * row by a scalar key and hydrate it) and save() (persist a Domain and return
+ * the persisted Domain); both need $domainClass. CachedDao layers its
+ * primary-key cache on top of the same contract.
  */
 trait SingleTableDao
 {
@@ -67,6 +73,90 @@ trait SingleTableDao
             throw new SqlException(static::class . ' must define $idColumn property');
         }
         $this->sql = new SqlBuilder($pdo, $logger);
+    }
+
+    /**
+     * Hydrates a raw row into a Domain object via $domainClass::fromArray().
+     *
+     * The using class may declare `protected string $domainClass`. DAOs that
+     * only need raw rows (table-gateway style) leave it undefined and never
+     * call this method. It is deliberately loud: calling it without a
+     * $domainClass throws rather than silently returning the raw row, so a
+     * missing declaration surfaces instead of being hidden.
+     *
+     * @param array<string, mixed> $row
+     * @throws SqlException if $domainClass is not defined
+     */
+    protected function hydrate(array $row): object
+    {
+        if (!isset($this->domainClass) || $this->domainClass === '') {
+            throw new SqlException(static::class . ' must define $domainClass property to hydrate rows');
+        }
+        $class = $this->domainClass;
+        return $class::fromArray($row);
+    }
+
+    /**
+     * Canonical read entry: fetches one row by a scalar key and hydrates it.
+     *
+     * Returns null when no row exists. CachedDao overrides this to serve the
+     * same Domain-returning contract from its primary-key cache.
+     */
+    public function findById(int|string $id): ?object
+    {
+        $row = $this->getById($id);
+        return $row === null ? null : $this->hydrate($row);
+    }
+
+    /**
+     * Canonical write entry: persists a Domain, returns the persisted Domain.
+     *
+     * A non-empty primary key on the Domain updates the row; otherwise the
+     * Domain is inserted and a fresh Domain with the generated key is
+     * returned. Numeric keys are normalised to int, while a non-numeric key
+     * (e.g. a UUID) stays a string, so the caller never casts the raw id.
+     */
+    public function save(object $domain): object
+    {
+        $row = $this->domainToArray($domain);
+        $id = $row[$this->idColumn] ?? null;
+
+        if ($id) {
+            $this->update($row);
+            return $domain;
+        }
+
+        unset($row[$this->idColumn]);
+        $row[$this->idColumn] = $this->normalizeKey($this->insert($row));
+
+        return $this->hydrate($row);
+    }
+
+    /**
+     * Reads the Domain's persistence row.
+     *
+     * Domains expose toArray() through MiGears\Domain\DataAccess; this package
+     * accepts any object (there is no shared Domain interface to type against),
+     * so the single call needs one narrow static-analysis escape.
+     *
+     * @return array<string, mixed>
+     */
+    private function domainToArray(object $domain): array
+    {
+        /** @var array<string, mixed> $row */
+        $row = $domain->toArray(); // @phpstan-ignore method.notFound
+
+        return $row;
+    }
+
+    /**
+     * Normalises a generated primary key: a numeric string becomes int, so an
+     * auto-increment key comes back as int without a hand-written cast, while
+     * a non-numeric key (UUID) is left as a string.
+     */
+    private function normalizeKey(string|int $id): string|int
+    {
+        return is_string($id) && ctype_digit($id) ? (int) $id : $id;
     }
 
     /**

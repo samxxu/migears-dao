@@ -18,6 +18,8 @@ class SingleTableDaoTest extends TestCase
 {
     private UserDao $dao;
 
+    private UserDomainDao $domainDao;
+
     protected function setUp(): void
     {
         $pdo = new PDO('sqlite::memory:');
@@ -51,6 +53,7 @@ class SingleTableDaoTest extends TestCase
         }
 
         $this->dao = new UserDao($pdo, new NullLogger());
+        $this->domainDao = new UserDomainDao($pdo, new NullLogger());
     }
 
     public function testGetByIdReturnsRow(): void
@@ -289,6 +292,108 @@ class SingleTableDaoTest extends TestCase
         };
         $dao->getById(1);
     }
+
+    public function testHydrateReturnsDomainWhenDomainClassDeclared(): void
+    {
+        $dao = new class(new PDO('sqlite::memory:'), new NullLogger()) {
+            use SingleTableDao;
+
+            protected string $table = 'users';
+            protected string $idColumn = 'id';
+            protected string $domainClass = UserDomain::class;
+
+            public function __construct(PDO $pdo, LoggerInterface $logger)
+            {
+                $this->initDao($pdo, $logger);
+            }
+
+            public function hydrateRow(array $row): object
+            {
+                return $this->hydrate($row);
+            }
+        };
+
+        $user = $dao->hydrateRow([
+            'id' => 1,
+            'user_name' => 'Alice',
+            'email' => 'alice@example.com',
+            'age' => 25,
+            'status' => 1,
+            'created_at' => '2026-01-01 00:00:00',
+        ]);
+
+        $this->assertInstanceOf(UserDomain::class, $user);
+        $this->assertSame('Alice', $user->user_name);
+    }
+
+    public function testHydrateWithoutDomainClassThrows(): void
+    {
+        $this->expectException(SqlException::class);
+
+        $dao = new class(new PDO('sqlite::memory:'), new NullLogger()) {
+            use SingleTableDao;
+
+            protected string $table = 'users';
+            protected string $idColumn = 'id';
+
+            public function __construct(PDO $pdo, LoggerInterface $logger)
+            {
+                $this->initDao($pdo, $logger);
+            }
+
+            public function hydrateRow(array $row): object
+            {
+                return $this->hydrate($row);
+            }
+        };
+
+        $dao->hydrateRow(['id' => 1]);
+    }
+
+    public function testFindByIdReturnsHydratedDomain(): void
+    {
+        $user = $this->domainDao->findById(1);
+
+        $this->assertInstanceOf(UserDomain::class, $user);
+        $this->assertSame('Alice', $user->user_name);
+    }
+
+    public function testFindByIdReturnsNullWhenNotFound(): void
+    {
+        $this->assertNull($this->domainDao->findById(999));
+    }
+
+    public function testSaveInsertsNewDomainAndNormalisesKeyToInt(): void
+    {
+        $created = $this->domainDao->save(new UserDomain(
+            id: 0,
+            user_name: 'Frank',
+            email: 'frank@example.com',
+            age: 40,
+            status: 1,
+            created_at: '2026-02-01 00:00:00',
+        ));
+
+        $this->assertInstanceOf(UserDomain::class, $created);
+        $this->assertSame(6, $created->id);
+        $this->assertSame('Frank', $created->user_name);
+        $this->assertNotNull($this->domainDao->getById(6));
+    }
+
+    public function testSaveUpdatesExistingDomain(): void
+    {
+        $saved = $this->domainDao->save(new UserDomain(
+            id: 1,
+            user_name: 'Alice Renamed',
+            email: 'alice@example.com',
+            age: 26,
+            status: 1,
+            created_at: '2026-01-01 00:00:00',
+        ));
+
+        $this->assertSame(1, $saved->id);
+        $this->assertSame('Alice Renamed', $this->domainDao->getById(1)['user_name']);
+    }
 }
 
 class UserDao
@@ -297,6 +402,20 @@ class UserDao
 
     protected string $table = 'users';
     protected string $idColumn = 'id';
+
+    public function __construct(PDO $pdo, LoggerInterface $logger)
+    {
+        $this->initDao($pdo, $logger);
+    }
+}
+
+class UserDomainDao
+{
+    use SingleTableDao;
+
+    protected string $table = 'users';
+    protected string $idColumn = 'id';
+    protected string $domainClass = UserDomain::class;
 
     public function __construct(PDO $pdo, LoggerInterface $logger)
     {

@@ -15,7 +15,8 @@ use MiGears\Sql\Exception\RecordNotFoundException;
  *
  * Adds a caching layer on top of SingleTableDao:
  *   - getById / getByIds check the cache first, fall back to the database,
- *     then hydrate the row into a Domain object via $domainClass::fromArray()
+ *     then hydrate the row into a Domain object via hydrate(), which
+ *     SingleTableDao provides ($domainClass::fromArray())
  *   - insert / update / delete invalidate the primary-key cache automatically
  *   - subclasses may override deleteCacheFor() to clear extra cache keys
  *     (e.g. byEmail / bySku) that reference the same Domain
@@ -107,12 +108,6 @@ trait CachedDao
         return $id;
     }
 
-    protected function hydrate(array $row): object
-    {
-        $class = $this->domainClass;
-        return $class::fromArray($row);
-    }
-
     /**
      * Reads the Domain's own primary key so that a cache hit and a database
      * row are indexed the same way. They disagree for non-canonical numeric
@@ -165,6 +160,17 @@ trait CachedDao
             $this->logger?->warning('CachedDao: cache write failed', ['exception' => $e]);
         }
         return $domain;
+    }
+
+    /**
+     * Canonical read entry, served from the cache.
+     *
+     * Overrides SingleTableDao::findById(): here getById() already returns a
+     * hydrated Domain, so hydrating a second time would be wrong — reuse it.
+     */
+    public function findById(int|string $id): ?object
+    {
+        return $this->getById($id);
     }
 
     /**

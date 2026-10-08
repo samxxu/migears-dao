@@ -1,6 +1,6 @@
 # migears/dao
 
-![Version](https://img.shields.io/badge/version-2.0.0-blue)
+![Version](https://img.shields.io/badge/version-2.3.0-blue)
 
 Minimalist DAO layer — connects SQL and Domain with zero abstraction.
 
@@ -10,17 +10,40 @@ Minimalist DAO layer — connects SQL and Domain with zero abstraction.
 
 ## Philosophy
 
-- **No generic CRUD base class** — `SingleTableDao` is a trait, not a base class
-- **Direct SQL in each method** — no magic, no auto-generated queries
+- **Generic single-table CRUD, delivered as a trait** — `SingleTableDao` *is* generic CRUD, but a trait rather than a base class, so it imposes no inheritance lock-in
+- **Business and multi-table SQL is written directly** — no query-builder DSL and no auto-generated SQL; anything beyond the generic single-table operations is plain SQL inside the DAO method
 - **Direct hydration via `Domain::fromArray()`** — no intermediate hydrator or mapper
 - **`toArray()` for persistence** — Domain → array → SQL
 - **One DAO per table** — simple and predictable
+
+### DAO design principle
+
+The API is shaped around one convention:
+
+- **Writes take a Domain** — `save(object $domain): object` is the canonical
+  write entry: a Domain carrying a primary key is updated, otherwise it is
+  inserted and the persisted Domain is returned.
+- **Reads/queries take scalars** — `findById(int|string $id)` (and the raw
+  `getById` / `getByIds` / `getAll` / `paginate`) are located by scalar values,
+  never by a Domain.
+- **Entity queries return a Domain** — `findById()` and `CachedDao::getById()`
+  return `Domain|null`. Aggregates, counts, id lists and projections are the
+  deliberate exception: they are not entities, so they return scalars.
+- **The Manager is the boundary** — only the Manager layer holds both a Domain
+  and a DAO and wires them together; the layers above it (resources /
+  controllers) see Domains, never DAOs. The DAO is where Domain and row meet.
+
+The package is therefore Domain-oriented rather than row-oriented. It stops
+short of a full Repository: there is no identity map and no collection
+semantics — a DAO reads and writes one table, and cross-table work is the
+application's job.
 
 ## Boundaries
 
 **In scope**
 
 - Single-table CRUD, delivered as a trait rather than a base class: `getById` / `getByIdOrFail` / `getByIds` / `getAll` / `count` / `paginate` / `insert` / `update` / `delete`, with a configurable `$idColumn` for a non-`id` primary key.
+- An optional `$domainClass` plus `hydrate()`, `findById()` and `save(Domain)`, which turn rows into Domain objects and persist Domains back; `CachedDao` builds on the same contract.
 - All data-access logic for one table, including complex joins and multi-table queries issued through the underlying `SqlBuilder` (`getSqlBuilder()`).
 - The cacheable variant `CachedDao`: caching primary-key reads (`getById` / `getByIds`), returning hydrated Domain objects, invalidating the primary-key cache automatically on writes, and exposing the `deleteCacheFor()` hook for extra keys.
 - Handing raw PDO rows straight to `Domain::fromArray()`, adding no casting of its own.
@@ -31,6 +54,7 @@ Minimalist DAO layer — connects SQL and Domain with zero abstraction.
 - Building/executing SQL and talking to PDO — delegated to `migears/sql` (its `SqlBuilder`, `SqlException`, `RecordNotFoundException`).
 - Defining Domain objects and normalizing/casting column values — owned by `migears/domain`; the DAO deliberately performs no `intval()` or column-type mapping.
 - Cache backend implementations and storage (array / Redis) — owned by `migears/cache`; the DAO only depends on `CacheInterface`.
+- Repository / identity-map semantics (managed entities, cross-table collection queries) — this is a single-table, Domain-oriented gateway, not a Repository; cross-table work belongs to the application.
 
 ## Installation
 
@@ -159,8 +183,10 @@ $dao->update($user->toArray());
 
 ```php
 $user  = $cachedDao->getById(1);          // ?UserDomain
+$user  = $cachedDao->findById(1);         // same, canonical read entry
 $user  = $cachedDao->getByIdOrFail(1);    // UserDomain (throws if not found)
 $users = $cachedDao->getByIds([1, 2]);    // [id => UserDomain]
+$user  = $cachedDao->save($userDomain);   // Domain in, persisted Domain out
 $all   = $cachedDao->getAll();            // UserDomain[]
 $page  = $cachedDao->paginate(1, 20);     // ['records' => UserDomain[], 'total' => int]
 ```
@@ -234,8 +260,8 @@ Complex joins and multi-table queries also belong in the DAO — all database ac
 ## Type Contract (with Domain)
 
 `SingleTableDao` / `CachedDao` hand raw rows straight to `Domain::fromArray()` —
-`CachedDao::hydrate()` calls `{$domainClass}::fromArray($row)` with no
-hydration magic. The Domain layer performs **zero coercion**: PHP 8.x strict typed
+`hydrate()` (defined in `SingleTableDao`, reused by `CachedDao`) calls
+`{$domainClass}::fromArray($row)` with no hydration magic. The Domain layer performs **zero coercion**: PHP 8.x strict typed
 named arguments bind each value to the declared constructor type, so a missing
 key, an extra key, or a type mismatch throws a native `\Error` / `\TypeError`
 (see migears/domain "Type Contract").
@@ -283,23 +309,35 @@ MIT
 
 # migears/dao
 
-![Version](https://img.shields.io/badge/version-2.0.0-blue)
+![Version](https://img.shields.io/badge/version-2.3.0-blue)
 
 极简 DAO 层 — 连接 SQL 和 Domain，零抽象。
 
 ## 设计哲学
 
-- **不封装通用 CRUD 基类** — `SingleTableDao` 是 trait，不是基类
-- **每个方法直接写 SQL** — 没有魔法，没有自动生成查询
+- **通用单表 CRUD，以 trait 提供** — `SingleTableDao` 本身就是通用 CRUD，只是以 trait 而非基类交付，因此不锁定继承关系
+- **业务查询与多表 SQL 直接书写** — 没有查询构造 DSL，也没有自动生成的 SQL；超出通用单表操作的部分就是 DAO 方法里的手写 SQL
 - **通过 `Domain::fromArray()` 直接 hydrate** — 不经过任何中间 hydrator 或 mapper
 - **`toArray()` 用于持久化** — Domain → 数组 → SQL
 - **一个 DAO 对应一张表** — 简单可预测
+
+### DAO 设计原则
+
+API 的形状只为一条约定服务：
+
+- **写操作收 Domain** —— 规范写入口是 `save(object $domain): object`：Domain 带主键则更新，否则插入并返回落库后的 Domain。
+- **读/查询收标量** —— `findById(int|string $id)`（以及底层的 `getById` / `getByIds` / `getAll` / `paginate`）只用标量定位，绝不以 Domain 为入参。
+- **实体查询返回 Domain** —— `findById()` 与 `CachedDao::getById()` 返回 `Domain|null`。聚合、计数、ID 列表与投影是刻意的例外：它们不是实体，返回标量。
+- **Manager 是边界** —— 只有 Manager 层同时持有 Domain 与 DAO 并把两者接起来；其上的层（resource / controller）只见 Domain、不见 DAO。Domain 与「行」相遇之处是 DAO 自己。
+
+因此本包是「面向 Domain」而非「面向行」的。它并未做成完整 Repository：没有 identity map，也没有集合语义——DAO 只读写一张表，跨表编排归应用。
 
 ## 边界
 
 **范围内**
 
 - 以 trait 而非基类提供单表 CRUD：`getById` / `getByIdOrFail` / `getByIds` / `getAll` / `count` / `paginate` / `insert` / `update` / `delete`，并可用 `$idColumn` 配置非 `id` 主键。
+- 可选的 `$domainClass` 与 `hydrate()`、`findById()`、`save(Domain)`：把行转成 Domain、把 Domain 落库；`CachedDao` 在同一契约之上构建。
 - 封装单表的全部数据访问逻辑，包括通过底层 `SqlBuilder`（`getSqlBuilder()`）编写的复杂关联查询与多表查询。
 - cacheable 变体 `CachedDao`：为按主键读取（`getById` / `getByIds`）加缓存、返回 hydrate 后的 Domain 对象、写操作自动失效主键缓存，并提供 `deleteCacheFor()` 钩子清理额外键。
 - 把 PDO 返回的原始行直接交给 `Domain::fromArray()`，自身不做任何 cast。
@@ -310,6 +348,7 @@ MIT
 - 拼接/执行 SQL 以及与 PDO 打交道 —— 交给 `migears/sql`（`SqlBuilder`、`SqlException`、`RecordNotFoundException`）。
 - 定义 Domain 对象、对列值做类型归一化/cast —— 由 `migears/domain` 负责；DAO 刻意不做 `intval()`，也不维护列类型映射。
 - 缓存后端的实现与存储（数组 / Redis）—— 由 `migears/cache` 负责；DAO 仅依赖 `CacheInterface`。
+- Repository / identity map 语义（受管实体、跨表集合式查询）—— 本包是单表、面向 Domain 的 gateway，不是 Repository；跨表工作归应用。
 
 ## 安装
 
@@ -438,8 +477,10 @@ $dao->update($user->toArray());
 
 ```php
 $user  = $cachedDao->getById(1);          // ?UserDomain
+$user  = $cachedDao->findById(1);         // 同上，规范读入口
 $user  = $cachedDao->getByIdOrFail(1);    // UserDomain（找不到抛异常）
 $users = $cachedDao->getByIds([1, 2]);    // [id => UserDomain]
+$user  = $cachedDao->save($userDomain);   // 收 Domain，返落库后的 Domain
 $all   = $cachedDao->getAll();            // UserDomain[]
 $page  = $cachedDao->paginate(1, 20);     // ['records' => UserDomain[], 'total' => int]
 ```
@@ -512,8 +553,8 @@ $rows = $dao->getSqlBuilder()
 ## 类型契约（与 Domain 衔接）
 
 `SingleTableDao` / `CachedDao` 将原始行直接交给 `Domain::fromArray()` —
-`CachedDao::hydrate()` 即调用 `{$domainClass}::fromArray($row)`，不做任何
-hydration 魔法。Domain 层**零类型转换**：PHP 8.x 强类型命名参数把每个值绑定到
+`hydrate()`（定义在 `SingleTableDao`，`CachedDao` 复用）即调用
+`{$domainClass}::fromArray($row)`，不做任何 hydration 魔法。Domain 层**零类型转换**：PHP 8.x 强类型命名参数把每个值绑定到
 构造声明的类型，缺键、多键或类型不匹配都会抛原生 `\Error` / `\TypeError`
 （参见 migears/domain「类型契约」）。
 
