@@ -86,6 +86,106 @@ class CachedDaoTest extends TestCase
         $this->assertNull($this->dao->getById(999));
     }
 
+    public function testForeignCacheValueIsTreatedAsMissOnGetById(): void
+    {
+        // A poisoned key must not be handed back as if it were a Domain.
+        $this->cache->set('users_1', new \stdClass());
+
+        $user = $this->dao->getById(1);
+
+        $this->assertInstanceOf(CachedUserDomain::class, $user);
+        $this->assertSame('Alice', $user->user_name);
+    }
+
+    public function testForeignCacheValueIsTreatedAsMissOnGetByIds(): void
+    {
+        $this->cache->set('users_1', ['not' => 'a domain']);
+        $this->cache->set('users_3', new \stdClass());
+
+        $users = $this->dao->getByIds([1, 3]);
+
+        $this->assertCount(2, $users);
+        $this->assertInstanceOf(CachedUserDomain::class, $users[1]);
+        $this->assertSame('Alice', $users[1]->user_name);
+        $this->assertInstanceOf(CachedUserDomain::class, $users[3]);
+        $this->assertSame('Charlie', $users[3]->user_name);
+    }
+
+    public function testForeignCacheValueIsPurgedAndWarnedOnGetById(): void
+    {
+        $cache = $this->createMock(CacheInterface::class);
+        $cache->method('get')->willReturn(new \stdClass());   // always a non-Domain value
+        $cache->expects($this->once())->method('delete')->with('users_1');
+        $cache->method('set')->willReturn(true);
+
+        $logger = new CapturingLogger();
+        $dao = new CachedUserDao($this->pdo, $logger, $cache);
+
+        $user = $dao->getById(1);
+
+        // Returned from the database, not from the dirty entry.
+        $this->assertInstanceOf(CachedUserDomain::class, $user);
+        $this->assertSame('Alice', $user->user_name);
+
+        // Exactly one warning, naming the purged key.
+        $warnings = array_values(array_filter(
+            $logger->records,
+            static fn(array $record): bool => $record['level'] === 'warning'
+        ));
+        $this->assertCount(1, $warnings);
+        $this->assertSame('users_1', $warnings[0]['context']['key']);
+    }
+
+    public function testForeignCacheValueIsPurgedAndWarnedOnGetByIds(): void
+    {
+        $cache = $this->createMock(CacheInterface::class);
+        $cache->method('get')->willReturn(new \stdClass());
+        $cache->expects($this->exactly(2))->method('delete');   // ids 1 and 3
+        $cache->method('set')->willReturn(true);
+
+        $logger = new CapturingLogger();
+        $dao = new CachedUserDao($this->pdo, $logger, $cache);
+
+        $users = $dao->getByIds([1, 3]);
+
+        $this->assertCount(2, $users);
+        $this->assertSame('Alice', $users[1]->user_name);
+        $this->assertSame('Charlie', $users[3]->user_name);
+
+        $warnings = array_values(array_filter(
+            $logger->records,
+            static fn(array $record): bool => $record['level'] === 'warning'
+        ));
+        $this->assertCount(2, $warnings);
+    }
+
+    public function testCacheMissIsNotWarnedAbout(): void
+    {
+        $logger = new CapturingLogger();
+        $dao = new CachedUserDao($this->pdo, $logger, $this->cache);
+
+        // A plain miss (null) is normal, not a dirty value.
+        $this->assertSame('Alice', $dao->getById(1)->user_name);
+
+        $warnings = array_values(array_filter(
+            $logger->records,
+            static fn(array $record): bool => $record['level'] === 'warning'
+        ));
+        $this->assertSame([], $warnings);
+    }
+
+    public function testForeignDomainClassIsTreatedAsDirty(): void
+    {
+        // A Domain of a *different* class is not a CachedUserDomain, so it must
+        // be discarded rather than handed back to the caller.
+        $this->cache->set('users_1', UuidUserDomain::fromArray(['uuid' => 'x', 'user_name' => 'nope']));
+
+        $user = $this->dao->getById(1);
+
+        $this->assertInstanceOf(CachedUserDomain::class, $user);
+        $this->assertSame('Alice', $user->user_name);
+    }
+
     public function testGetByIdsBatchHydratesAndCaches(): void
     {
         $users = $this->dao->getByIds([1, 3]);
@@ -228,15 +328,6 @@ class CachedDaoTest extends TestCase
         $this->assertSame('Zoe', $user->user_name);
     }
 
-    public function testPaginateHydratesDomains(): void
-    {
-        $result = $this->dao->paginate(1, 2);
-        $this->assertSame(3, $result['total']);
-        $this->assertCount(2, $result['records']);
-        $this->assertContainsOnlyInstancesOf(CachedUserDomain::class, $result['records']);
-        $this->assertSame('Charlie', $result['records'][0]->user_name);
-    }
-
     public function testDeleteCacheFailureDoesNotPropagate(): void
     {
         $flakyCache = $this->createMock(CacheInterface::class);
@@ -290,14 +381,13 @@ class CachedDaoTest extends TestCase
         $this->assertSame('Alice', $users[1]->user_name);
     }
 
-    public function testPrimaryKeyReadsUseCacheButGetAllCountPaginateDoNot(): void
+    public function testPrimaryKeyReadsUseCacheButGetAllAndCountDoNot(): void
     {
         $cache = new ArrayCache(new NullLogger());
         $dao = new CachedUserDao($this->pdo, new NullLogger(), $cache);
 
         $dao->getAll();
         $dao->count();
-        $dao->paginate(1, 2);
 
         // Only primary-key lookups populate the cache; the other reads always
         // hit the database (the README states exactly this).
@@ -306,36 +396,19 @@ class CachedDaoTest extends TestCase
         $this->assertFalse($cache->has('users_3'));
     }
 
-    public function testUninitializedCacheThrowsSqlException(): void
+    public function testUninitializedCacheThrowsLogicException(): void
     {
-        $this->expectException(SqlException::class);
+        $this->expectException(\LogicException::class);
 
         $dao = new class {
             use CachedDao;
 
-            protected string $table = 'users';
-            protected string $idColumn = 'id';
-            protected string $domainClass = CachedUserDomain::class;
+            protected function table(): string { return 'users'; }
+            protected function idColumn(): string { return 'id'; }
+            protected function domainClass(): string { return CachedUserDomain::class; }
         };
 
         $dao->getById(1);
-    }
-
-    public function testInitCachedDaoWithoutDomainClassThrows(): void
-    {
-        $this->expectException(SqlException::class);
-
-        new class($this->pdo, new NullLogger(), new ArrayCache(new NullLogger())) {
-            use CachedDao;
-
-            protected string $table = 'users';
-            protected string $idColumn = 'id';
-
-            public function __construct(PDO $pdo, LoggerInterface $logger, CacheInterface $cache)
-            {
-                $this->initCachedDao($pdo, $logger, $cache);
-            }
-        };
     }
 
     public function testInsertWithDefaultHookSkipsReadBack(): void
@@ -506,7 +579,7 @@ class CachedDaoTest extends TestCase
 
     /**
      * The README's "Using CachedDao" example must be copyable: without the
-     * constructor and initCachedDao() the DAO stays uninitialised.
+     * constructor (initDao() + initCachedDao()) the DAO stays uninitialised.
      *
      * @dataProvider readmeCachedDaoSections
      */
@@ -524,7 +597,8 @@ class CachedDaoTest extends TestCase
         }
 
         $this->assertStringContainsString('public function __construct(', $section);
-        $this->assertStringContainsString('initCachedDao($pdo, $logger, $cache);', $section);
+        $this->assertStringContainsString('initDao($pdo, $logger);', $section);
+        $this->assertStringContainsString('initCachedDao($cache, $logger);', $section);
     }
 
     /** @return list<array{string}> */
@@ -557,13 +631,16 @@ class CachedUserDao
 {
     use CachedDao;
 
-    protected string $table = 'users';
-    protected string $idColumn = 'id';
-    protected string $domainClass = CachedUserDomain::class;
+    protected function table(): string { return 'users'; }
+
+    protected function idColumn(): string { return 'id'; }
+
+    protected function domainClass(): string { return CachedUserDomain::class; }
 
     public function __construct(PDO $pdo, LoggerInterface $logger, CacheInterface $cache)
     {
-        $this->initCachedDao($pdo, $logger, $cache);
+        $this->initDao($pdo, $logger);
+        $this->initCachedDao($cache, $logger);
     }
 }
 
@@ -571,16 +648,19 @@ class HookUserDao
 {
     use CachedDao;
 
-    protected string $table = 'users';
-    protected string $idColumn = 'id';
-    protected string $domainClass = CachedUserDomain::class;
+    protected function table(): string { return 'users'; }
+
+    protected function idColumn(): string { return 'id'; }
+
+    protected function domainClass(): string { return CachedUserDomain::class; }
 
     public int $hookCalls = 0;
     public ?CachedUserDomain $hookDomain = null;
 
     public function __construct(PDO $pdo, LoggerInterface $logger, CacheInterface $cache)
     {
-        $this->initCachedDao($pdo, $logger, $cache);
+        $this->initDao($pdo, $logger);
+        $this->initCachedDao($cache, $logger);
     }
 
     protected function deleteCacheFor(?object $domain): void
@@ -608,16 +688,19 @@ class UuidUserDao
 {
     use CachedDao;
 
-    protected string $table = 'uuid_users';
-    protected string $idColumn = 'uuid';
-    protected string $domainClass = UuidUserDomain::class;
+    protected function table(): string { return 'uuid_users'; }
+
+    protected function idColumn(): string { return 'uuid'; }
+
+    protected function domainClass(): string { return UuidUserDomain::class; }
 
     public int $hookCalls = 0;
     public ?UuidUserDomain $hookDomain = null;
 
     public function __construct(PDO $pdo, LoggerInterface $logger, CacheInterface $cache)
     {
-        $this->initCachedDao($pdo, $logger, $cache);
+        $this->initDao($pdo, $logger);
+        $this->initCachedDao($cache, $logger);
     }
 
     protected function deleteCacheFor(?object $domain): void
@@ -660,13 +743,16 @@ class HiddenIdUserDao
 {
     use CachedDao;
 
-    protected string $table = 'users';
-    protected string $idColumn = 'id';
-    protected string $domainClass = HiddenIdUserDomain::class;
+    protected function table(): string { return 'users'; }
+
+    protected function idColumn(): string { return 'id'; }
+
+    protected function domainClass(): string { return HiddenIdUserDomain::class; }
 
     public function __construct(PDO $pdo, LoggerInterface $logger, CacheInterface $cache)
     {
-        $this->initCachedDao($pdo, $logger, $cache);
+        $this->initDao($pdo, $logger);
+        $this->initCachedDao($cache, $logger);
     }
 }
 

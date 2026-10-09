@@ -23,12 +23,15 @@ The API is shaped around one convention:
 - **Writes take a Domain** — `save(object $domain): object` is the canonical
   write entry: a Domain carrying a primary key is updated, otherwise it is
   inserted and the persisted Domain is returned.
-- **Reads/queries take scalars** — `findById(int|string $id)` (and the raw
-  `getById` / `getByIds` / `getAll` / `paginate`) are located by scalar values,
-  never by a Domain.
-- **Entity queries return a Domain** — `findById()` and `CachedDao::getById()`
-  return `Domain|null`. Aggregates, counts, id lists and projections are the
-  deliberate exception: they are not entities, so they return scalars.
+- **Reads/queries take scalars** — `getById(int|string $id)`, `getByIds` and
+  `getAll` are located by scalar values, never by a Domain.
+- **Entity queries return a Domain** — a DAO's entity reads (`getById` /
+  `getByIdOrFail` / `getByIds` / `getAll`) return hydrated `Domain` objects.
+  Pagination is a separate, opt-in strategy: `OffsetPagination::paginate()`
+  and `CursorPagination::paginateAfter()` wrap a page of Domains in the
+  matching `migears/utils` DTO. Aggregates (`count`) and projections issued
+  through `sql()` are the deliberate exception: they are not
+  entities, so they return scalars / raw rows.
 - **The Manager is the boundary** — only the Manager layer holds both a Domain
   and a DAO and wires them together; the layers above it (resources /
   controllers) see Domains, never DAOs. The DAO is where Domain and row meet.
@@ -42,10 +45,11 @@ application's job.
 
 **In scope**
 
-- Single-table CRUD, delivered as a trait rather than a base class: `getById` / `getByIdOrFail` / `getByIds` / `getAll` / `count` / `paginate` / `insert` / `update` / `delete`, with a configurable `$idColumn` for a non-`id` primary key.
-- An optional `$domainClass` plus `hydrate()`, `findById()` and `save(Domain)`, which turn rows into Domain objects and persist Domains back; `CachedDao` builds on the same contract.
-- All data-access logic for one table, including complex joins and multi-table queries issued through the underlying `SqlBuilder` (`getSqlBuilder()`).
-- The cacheable variant `CachedDao`: caching primary-key reads (`getById` / `getByIds`), returning hydrated Domain objects, invalidating the primary-key cache automatically on writes, and exposing the `deleteCacheFor()` hook for extra keys.
+- Single-table CRUD, delivered as a trait rather than a base class: entity reads (`getById` / `getByIdOrFail` / `getByIds` / `getAll`) returning hydrated Domains, plus `count` / `insert` / `update` / `delete`, with a configurable `$idColumn` for a non-`id` primary key.
+- Two opt-in pagination traits layered on the CRUD trait: `OffsetPagination` (`paginate()` → `MiGears\Utils\Paginator`, one `COUNT(*)` per page for an exact total) and `CursorPagination` (`paginateAfter()` → `MiGears\Utils\FlowPaginator`, one extra row per page instead of a count).
+- Abstract `table()` / `idColumn()` / `domainClass()` hooks plus `hydrate()` and `save(Domain)`, which turn rows into Domain objects and persist Domains back; `CachedDao` builds on the same contract.
+- All data-access logic for one table, including complex joins and multi-table queries issued through the underlying `SqlBuilder` (`sql()`); those projections come back as raw rows.
+- The cacheable variant `CachedDao`: caching the primary-key reads (`getById` / `getByIds`), invalidating the primary-key cache automatically on writes, and exposing the `deleteCacheFor()` hook for extra keys. (`getAll`, `count` and `getByIdOrFail` are inherited unchanged; pagination is not part of the cache layer — compose a pagination trait separately.)
 - Handing raw PDO rows straight to `Domain::fromArray()`, adding no casting of its own.
 
 **Not in scope (by design)**
@@ -54,6 +58,7 @@ application's job.
 - Building/executing SQL and talking to PDO — delegated to `migears/sql` (its `SqlBuilder`, `SqlException`, `RecordNotFoundException`).
 - Defining Domain objects and normalizing/casting column values — owned by `migears/domain`; the DAO deliberately performs no `intval()` or column-type mapping.
 - Cache backend implementations and storage (array / Redis) — owned by `migears/cache`; the DAO only depends on `CacheInterface`.
+- Pagination data structures (`Paginator` / `FlowPaginator`) — owned by `migears/utils`; the pagination traits only wrap a page's Domains in one.
 - Repository / identity-map semantics (managed entities, cross-table collection queries) — this is a single-table, Domain-oriented gateway, not a Repository; cross-table work belongs to the application.
 
 ## Installation
@@ -62,7 +67,7 @@ application's job.
 composer require migears/dao
 ```
 
-Requires: PHP 8.1+, ext-pdo, `psr/log`, `migears/sql`, `migears/domain`, `migears/cache`.
+Requires: PHP 8.1+, ext-pdo, `psr/log`, `migears/sql`, `migears/domain`, `migears/cache`, `migears/utils`.
 
 ## Constructor Contract
 
@@ -83,8 +88,11 @@ class PlainUserDao
 {
     use SingleTableDao;
 
-    protected string $table = 'users';
-    protected string $idColumn = 'id';
+    protected function table(): string { return 'users'; }
+
+    protected function idColumn(): string { return 'id'; }
+
+    protected function domainClass(): string { return UserDomain::class; }
 
     public function __construct(PDO $pdo, LoggerInterface $logger)
     {
@@ -97,19 +105,26 @@ class CachedUserDao
 {
     use CachedDao;
 
-    protected string $table = 'users';
-    protected string $idColumn = 'id';
-    protected string $domainClass = UserDomain::class;
+    protected function table(): string { return 'users'; }
+
+    protected function idColumn(): string { return 'id'; }
+
+    protected function domainClass(): string { return UserDomain::class; }
 
     public function __construct(PDO $pdo, LoggerInterface $logger, CacheInterface $cache)
     {
-        $this->initCachedDao($pdo, $logger, $cache);
+        $this->initDao($pdo, $logger);
+        $this->initCachedDao($cache, $logger);
     }
 }
 ```
 
 `$logger` is **never** defaulted inside a DAO — it is always injected by the caller.
 This keeps every DAO's construction explicit, testable, and uniform across the codebase.
+
+`table()`, `idColumn()` and `domainClass()` are declared abstract by the trait,
+so a DAO that forgets any of them fails to compile rather than misbehaving at
+run time; there is no separate "define the properties" step.
 
 ## Quick Start
 
@@ -134,8 +149,11 @@ class UserDao
 {
     use SingleTableDao;
 
-    protected string $table = 'users';
-    protected string $idColumn = 'id';
+    protected function table(): string { return 'users'; }
+
+    protected function idColumn(): string { return 'id'; }
+
+    protected function domainClass(): string { return UserDomain::class; }
 
     public function __construct(PDO $pdo, LoggerInterface $logger)
     {
@@ -150,12 +168,11 @@ class UserDao
 $dao = new UserDao($pdo, $logger);
 
 // Read
-$row = $dao->getById(1);                    // array|null
-$row = $dao->getByIdOrFail(1);              // array (throws if not found)
-$rows = $dao->getByIds([1, 2, 3]);          // array keyed by ID
-$all = $dao->getAll();                       // all rows (id DESC)
-$count = $dao->count();                      // int
-$page = $dao->paginate(1, 20);               // ['records' => [...], 'total' => 100]
+$user  = $dao->getById(1);                    // UserDomain|null
+$user  = $dao->getByIdOrFail(1);              // UserDomain (throws if not found)
+$users = $dao->getByIds([1, 2, 3]);           // [id => UserDomain]
+$all   = $dao->getAll();                       // UserDomain[] (id DESC)
+$count = $dao->count();                        // int
 
 // Write
 $id = $dao->insert(['user_name' => 'Alice', 'email' => 'a@b.com']);  // last insert id (string)
@@ -163,32 +180,87 @@ $n = $dao->update(['id' => 1, 'user_name' => 'Bob']);                  // affect
 $n = $dao->delete(1);                                                  // affected rows
 ```
 
+### Pagination
+
+Pagination is opt-in: compose `OffsetPagination` or `CursorPagination` on top
+of `SingleTableDao`, whichever matches the query strategy.
+
+**Offset** — page numbers with an exact total (`MiGears\Utils\Paginator`):
+
+```php
+class UserDao
+{
+    use SingleTableDao;
+    use OffsetPagination;
+
+    protected function table(): string { return 'users'; }
+    protected function idColumn(): string { return 'id'; }
+    protected function domainClass(): string { return UserDomain::class; }
+}
+
+$page = $dao->paginate(2, 20);   // runs one COUNT(*) for the total
+
+$page->items();       // UserDomain[] on the current page
+$page->total();       // int — rows across all pages
+$page->totalPages();  // int
+$page->hasNext();     // bool
+```
+
+**Cursor** — keyset / "load more" without a total (`MiGears\Utils\FlowPaginator`):
+
+```php
+class UserDao
+{
+    use SingleTableDao;
+    use CursorPagination;
+
+    protected function table(): string { return 'users'; }
+    protected function idColumn(): string { return 'id'; }
+    protected function domainClass(): string { return UserDomain::class; }
+}
+
+$page = $dao->paginateAfter(null, 20);                 // first page
+$page->items();                                        // UserDomain[]
+$page->hasMore();                                      // bool
+$page = $dao->paginateAfter($page->nextCursor(), 20);  // next page
+```
+
+`CursorPagination` reads one extra row to decide `hasMore` instead of running a
+`COUNT(*)`, and orders by the primary key descending; the cursor is that key, so
+the Domain must expose it publicly.
+
 ### With Domain Objects
 
 ```php
-// Array → Domain
-$row = $dao->getByIdOrFail(1);
-$user = UserDomain::fromArray($row);
+// Entity reads already return a Domain — no manual fromArray() step
+$user = $dao->getByIdOrFail(1);
 echo $user->user_name;  // "Alice"
 
-// Domain → Array → SQL
+// save() takes a Domain and returns the persisted Domain (insert or update)
+$user = $dao->save($userDomain);
+
+// Writes also accept the array form that toArray() produces
 $dao->update($user->toArray());
 ```
 
 ### Using CachedDao
 
-`CachedDao` caches primary-key lookups (`getById` / `getByIds`) and returns
-**hydrated Domain objects** instead of raw arrays. `getAll()`, `count()` and
-`paginate()` always query the database — only the primary-key reads are cached.
+Both traits return **hydrated Domain objects**; `CachedDao` additionally caches
+the primary-key lookups (`getById` / `getByIds`). `getAll()` and `count()` always
+query the database — only the primary-key reads are cached. Pagination is not
+part of the cache layer: compose `OffsetPagination` / `CursorPagination` on the
+cacheable DAO if you need it. `CachedDao` depends only on `CacheInterface` and
+the `SingleTableDao` contract — it references no `migears/sql` type, so all SQL
+and its exceptions stay in `SingleTableDao`. A cache hit is returned only when
+it really is a `Domain` of the DAO's class; a stale or foreign value is logged
+as a warning, deleted, and re-read from the database.
 
 ```php
-$user  = $cachedDao->getById(1);          // ?UserDomain
-$user  = $cachedDao->findById(1);         // same, canonical read entry
+$user  = $cachedDao->getById(1);          // ?UserDomain (cached)
 $user  = $cachedDao->getByIdOrFail(1);    // UserDomain (throws if not found)
-$users = $cachedDao->getByIds([1, 2]);    // [id => UserDomain]
+$users = $cachedDao->getByIds([1, 2]);    // [id => UserDomain] (cached)
 $user  = $cachedDao->save($userDomain);   // Domain in, persisted Domain out
 $all   = $cachedDao->getAll();            // UserDomain[]
-$page  = $cachedDao->paginate(1, 20);     // ['records' => UserDomain[], 'total' => int]
 ```
 
 Write operations (`insert` / `update` / `delete`) automatically invalidate
@@ -200,13 +272,16 @@ class UserDao
 {
     use CachedDao;
 
-    protected string $table = 'users';
-    protected string $idColumn = 'id';
-    protected string $domainClass = UserDomain::class;
+    protected function table(): string { return 'users'; }
+
+    protected function idColumn(): string { return 'id'; }
+
+    protected function domainClass(): string { return UserDomain::class; }
 
     public function __construct(PDO $pdo, LoggerInterface $logger, CacheInterface $cache)
     {
-        $this->initCachedDao($pdo, $logger, $cache);
+        $this->initDao($pdo, $logger);
+        $this->initCachedDao($cache, $logger);
     }
 
     protected function deleteCacheFor(?object $user): void
@@ -233,8 +308,11 @@ class PostDao
 {
     use SingleTableDao;
 
-    protected string $table = 'posts';
-    protected string $idColumn = 'post_id';
+    protected function table(): string { return 'posts'; }
+
+    protected function idColumn(): string { return 'post_id'; }
+
+    protected function domainClass(): string { return PostDomain::class; }
 
     public function __construct(PDO $pdo, LoggerInterface $logger)
     {
@@ -248,7 +326,7 @@ class PostDao
 For queries beyond simple CRUD, use the underlying `SqlBuilder`:
 
 ```php
-$rows = $dao->getSqlBuilder()
+$rows = $dao->sql()
     ->select(['u.user_name', 'p.title'])
     ->from('users u')
     ->where('u.id = p.user_id', [])
@@ -261,7 +339,7 @@ Complex joins and multi-table queries also belong in the DAO — all database ac
 
 `SingleTableDao` / `CachedDao` hand raw rows straight to `Domain::fromArray()` —
 `hydrate()` (defined in `SingleTableDao`, reused by `CachedDao`) calls
-`{$domainClass}::fromArray($row)` with no hydration magic. The Domain layer performs **zero coercion**: PHP 8.x strict typed
+`fromArray($row)` on the class returned by `domainClass()`, with no hydration magic. The Domain layer performs **zero coercion**: PHP 8.x strict typed
 named arguments bind each value to the declared constructor type, so a missing
 key, an extra key, or a type mismatch throws a native `\Error` / `\TypeError`
 (see migears/domain "Type Contract").
@@ -326,8 +404,8 @@ MIT
 API 的形状只为一条约定服务：
 
 - **写操作收 Domain** —— 规范写入口是 `save(object $domain): object`：Domain 带主键则更新，否则插入并返回落库后的 Domain。
-- **读/查询收标量** —— `findById(int|string $id)`（以及底层的 `getById` / `getByIds` / `getAll` / `paginate`）只用标量定位，绝不以 Domain 为入参。
-- **实体查询返回 Domain** —— `findById()` 与 `CachedDao::getById()` 返回 `Domain|null`。聚合、计数、ID 列表与投影是刻意的例外：它们不是实体，返回标量。
+- **读/查询收标量** —— `getById(int|string $id)`、`getByIds` 与 `getAll` 只用标量定位，绝不以 Domain 为入参。
+- **实体查询返回 Domain** —— DAO 的实体读（`getById` / `getByIdOrFail` / `getByIds` / `getAll`）返回 hydrate 后的 `Domain` 对象。分页是独立的、可选的策略：`OffsetPagination::paginate()` 与 `CursorPagination::paginateAfter()` 把一页 Domain 装进对应的 `migears/utils` DTO。聚合（`count`）与经 `sql()` 发出的投影是刻意的例外：它们不是实体，返回标量 / 原始行。
 - **Manager 是边界** —— 只有 Manager 层同时持有 Domain 与 DAO 并把两者接起来；其上的层（resource / controller）只见 Domain、不见 DAO。Domain 与「行」相遇之处是 DAO 自己。
 
 因此本包是「面向 Domain」而非「面向行」的。它并未做成完整 Repository：没有 identity map，也没有集合语义——DAO 只读写一张表，跨表编排归应用。
@@ -336,10 +414,11 @@ API 的形状只为一条约定服务：
 
 **范围内**
 
-- 以 trait 而非基类提供单表 CRUD：`getById` / `getByIdOrFail` / `getByIds` / `getAll` / `count` / `paginate` / `insert` / `update` / `delete`，并可用 `$idColumn` 配置非 `id` 主键。
-- 可选的 `$domainClass` 与 `hydrate()`、`findById()`、`save(Domain)`：把行转成 Domain、把 Domain 落库；`CachedDao` 在同一契约之上构建。
-- 封装单表的全部数据访问逻辑，包括通过底层 `SqlBuilder`（`getSqlBuilder()`）编写的复杂关联查询与多表查询。
-- cacheable 变体 `CachedDao`：为按主键读取（`getById` / `getByIds`）加缓存、返回 hydrate 后的 Domain 对象、写操作自动失效主键缓存，并提供 `deleteCacheFor()` 钩子清理额外键。
+- 以 trait 而非基类提供单表 CRUD：实体读（`getById` / `getByIdOrFail` / `getByIds` / `getAll`）返回 hydrate 后的 Domain，另有 `count` / `insert` / `update` / `delete`，并可用 `$idColumn` 配置非 `id` 主键。
+- 两个可选的、叠加在 CRUD trait 之上的分页 trait：`OffsetPagination`（`paginate()` → `MiGears\Utils\Paginator`，每页一次 `COUNT(*)` 换精确总数）与 `CursorPagination`（`paginateAfter()` → `MiGears\Utils\FlowPaginator`，用多取一行代替计数）。
+- 抽象钩子 `table()` / `idColumn()` / `domainClass()`，以及 `hydrate()`、`save(Domain)`：把行转成 Domain、把 Domain 落库；`CachedDao` 在同一契约之上构建。
+- 封装单表的全部数据访问逻辑，包括通过底层 `SqlBuilder`（`sql()`）编写的复杂关联查询与多表查询；这些投影仍以原始行返回。
+- cacheable 变体 `CachedDao`：为按主键读取（`getById` / `getByIds`）加缓存、写操作自动失效主键缓存，并提供 `deleteCacheFor()` 钩子清理额外键。（`getAll`、`count` 与 `getByIdOrFail` 直接继承，不做改动；分页不属于缓存层——需要时另行组合分页 trait。）
 - 把 PDO 返回的原始行直接交给 `Domain::fromArray()`，自身不做任何 cast。
 
 **范围外（刻意不做）**
@@ -348,6 +427,7 @@ API 的形状只为一条约定服务：
 - 拼接/执行 SQL 以及与 PDO 打交道 —— 交给 `migears/sql`（`SqlBuilder`、`SqlException`、`RecordNotFoundException`）。
 - 定义 Domain 对象、对列值做类型归一化/cast —— 由 `migears/domain` 负责；DAO 刻意不做 `intval()`，也不维护列类型映射。
 - 缓存后端的实现与存储（数组 / Redis）—— 由 `migears/cache` 负责；DAO 仅依赖 `CacheInterface`。
+- 分页数据结构（`Paginator` / `FlowPaginator`）—— 由 `migears/utils` 负责；分页 trait 只负责把一页 Domain 装进去。
 - Repository / identity map 语义（受管实体、跨表集合式查询）—— 本包是单表、面向 Domain 的 gateway，不是 Repository；跨表工作归应用。
 
 ## 安装
@@ -356,7 +436,7 @@ API 的形状只为一条约定服务：
 composer require migears/dao
 ```
 
-要求：PHP 8.1+、ext-pdo、`psr/log`、`migears/sql`、`migears/domain`、`migears/cache`。
+要求：PHP 8.1+、ext-pdo、`psr/log`、`migears/sql`、`migears/domain`、`migears/cache`、`migears/utils`。
 
 ## 构造契约
 
@@ -377,8 +457,11 @@ class PlainUserDao
 {
     use SingleTableDao;
 
-    protected string $table = 'users';
-    protected string $idColumn = 'id';
+    protected function table(): string { return 'users'; }
+
+    protected function idColumn(): string { return 'id'; }
+
+    protected function domainClass(): string { return UserDomain::class; }
 
     public function __construct(PDO $pdo, LoggerInterface $logger)
     {
@@ -391,19 +474,26 @@ class CachedUserDao
 {
     use CachedDao;
 
-    protected string $table = 'users';
-    protected string $idColumn = 'id';
-    protected string $domainClass = UserDomain::class;
+    protected function table(): string { return 'users'; }
+
+    protected function idColumn(): string { return 'id'; }
+
+    protected function domainClass(): string { return UserDomain::class; }
 
     public function __construct(PDO $pdo, LoggerInterface $logger, CacheInterface $cache)
     {
-        $this->initCachedDao($pdo, $logger, $cache);
+        $this->initDao($pdo, $logger);
+        $this->initCachedDao($cache, $logger);
     }
 }
 ```
 
 `$logger` 在 DAO 内部**绝不会被默认填充**——始终由调用方注入。
 这让每个 DAO 的构造过程保持显式、可测试，并在整个代码库中保持一致。
+
+`table()`、`idColumn()` 与 `domainClass()` 由 trait 声明为 abstract，
+DAO 漏掉任何一个都无法通过编译，而不是到运行时才出错；
+也不再需要单独声明属性。
 
 ## 快速开始
 
@@ -428,8 +518,11 @@ class UserDao
 {
     use SingleTableDao;
 
-    protected string $table = 'users';
-    protected string $idColumn = 'id';
+    protected function table(): string { return 'users'; }
+
+    protected function idColumn(): string { return 'id'; }
+
+    protected function domainClass(): string { return UserDomain::class; }
 
     public function __construct(PDO $pdo, LoggerInterface $logger)
     {
@@ -444,12 +537,11 @@ class UserDao
 $dao = new UserDao($pdo, $logger);
 
 // 读
-$row = $dao->getById(1);                    // array|null
-$row = $dao->getByIdOrFail(1);              // array（找不到抛异常）
-$rows = $dao->getByIds([1, 2, 3]);          // 按主键索引的数组
-$all = $dao->getAll();                       // 全部记录（按 id 降序）
-$count = $dao->count();                      // int
-$page = $dao->paginate(1, 20);               // ['records' => [...], 'total' => 100]
+$user  = $dao->getById(1);                    // UserDomain|null
+$user  = $dao->getByIdOrFail(1);              // UserDomain（找不到抛异常）
+$users = $dao->getByIds([1, 2, 3]);           // [id => UserDomain]
+$all   = $dao->getAll();                       // UserDomain[]（按 id 降序）
+$count = $dao->count();                        // int
 
 // 写
 $id = $dao->insert(['user_name' => 'Alice', 'email' => 'a@b.com']);  // 自增 ID（string）
@@ -457,32 +549,85 @@ $n = $dao->update(['id' => 1, 'user_name' => 'Bob']);                  // 影响
 $n = $dao->delete(1);                                                  // 影响行数
 ```
 
+### 分页
+
+分页是可选的：在 `SingleTableDao` 之上按查询策略组合 `OffsetPagination`
+或 `CursorPagination` 之一。
+
+**偏移分页** —— 页码 + 精确总数（`MiGears\Utils\Paginator`）：
+
+```php
+class UserDao
+{
+    use SingleTableDao;
+    use OffsetPagination;
+
+    protected function table(): string { return 'users'; }
+    protected function idColumn(): string { return 'id'; }
+    protected function domainClass(): string { return UserDomain::class; }
+}
+
+$page = $dao->paginate(2, 20);   // 为总数执行一次 COUNT(*)
+
+$page->items();       // 当前页的 UserDomain[]
+$page->total();       // int —— 全部页的总行数
+$page->totalPages();  // int
+$page->hasNext();     // bool
+```
+
+**游标分页** —— keyset / 「加载更多」，无总数（`MiGears\Utils\FlowPaginator`）：
+
+```php
+class UserDao
+{
+    use SingleTableDao;
+    use CursorPagination;
+
+    protected function table(): string { return 'users'; }
+    protected function idColumn(): string { return 'id'; }
+    protected function domainClass(): string { return UserDomain::class; }
+}
+
+$page = $dao->paginateAfter(null, 20);                 // 首页
+$page->items();                                        // UserDomain[]
+$page->hasMore();                                      // bool
+$page = $dao->paginateAfter($page->nextCursor(), 20);  // 下一页
+```
+
+`CursorPagination` 用多取一行来判断 `hasMore`，不执行 `COUNT(*)`；按主键
+降序排列，游标就是该主键，因此 Domain 必须公开暴露它。
+
 ### 配合 Domain 对象
 
 ```php
-// 数组 → Domain
-$row = $dao->getByIdOrFail(1);
-$user = UserDomain::fromArray($row);
+// 实体读直接返回 Domain —— 无需手动 fromArray()
+$user = $dao->getByIdOrFail(1);
 echo $user->user_name;  // "Alice"
 
-// Domain → 数组 → SQL
+// save() 收 Domain、返落库后的 Domain（插入或更新）
+$user = $dao->save($userDomain);
+
+// 写操作同样接受 toArray() 产出的数组形式
 $dao->update($user->toArray());
 ```
 
 ### 使用 CachedDao
 
-`CachedDao` 为按主键的读取（`getById` / `getByIds`）加上缓存层，并返回
-**已 hydrate 的 Domain 对象**而非原始数组。`getAll()`、`count()` 与
-`paginate()` 始终查询数据库——只有按主键的读取走缓存。
+两个 trait 都返回 **已 hydrate 的 Domain 对象**；`CachedDao` 额外为按主键的
+读取（`getById` / `getByIds`）加上缓存层。`getAll()` 与 `count()` 始终查询
+数据库——只有按主键的读取走缓存。分页不属于缓存层：需要时在 cacheable DAO
+上另行组合 `OffsetPagination` / `CursorPagination`。`CachedDao` 只依赖
+`CacheInterface` 与 `SingleTableDao` 的契约——不引用任何 `migears/sql` 类型，
+SQL 及其异常都留在 `SingleTableDao`。缓存命中只在该值确实属于本 DAO 的
+`Domain` 类时才返回；陈旧或异类的缓存值会被记一条 warning、从缓存中删除，
+再重新查库。
 
 ```php
-$user  = $cachedDao->getById(1);          // ?UserDomain
-$user  = $cachedDao->findById(1);         // 同上，规范读入口
+$user  = $cachedDao->getById(1);          // ?UserDomain（走缓存）
 $user  = $cachedDao->getByIdOrFail(1);    // UserDomain（找不到抛异常）
-$users = $cachedDao->getByIds([1, 2]);    // [id => UserDomain]
+$users = $cachedDao->getByIds([1, 2]);    // [id => UserDomain]（走缓存）
 $user  = $cachedDao->save($userDomain);   // 收 Domain，返落库后的 Domain
 $all   = $cachedDao->getAll();            // UserDomain[]
-$page  = $cachedDao->paginate(1, 20);     // ['records' => UserDomain[], 'total' => int]
 ```
 
 写操作（`insert` / `update` / `delete`）会自动失效主键缓存。如需清理
@@ -494,13 +639,16 @@ class UserDao
 {
     use CachedDao;
 
-    protected string $table = 'users';
-    protected string $idColumn = 'id';
-    protected string $domainClass = UserDomain::class;
+    protected function table(): string { return 'users'; }
+
+    protected function idColumn(): string { return 'id'; }
+
+    protected function domainClass(): string { return UserDomain::class; }
 
     public function __construct(PDO $pdo, LoggerInterface $logger, CacheInterface $cache)
     {
-        $this->initCachedDao($pdo, $logger, $cache);
+        $this->initDao($pdo, $logger);
+        $this->initCachedDao($cache, $logger);
     }
 
     protected function deleteCacheFor(?object $user): void
@@ -526,8 +674,11 @@ class PostDao
 {
     use SingleTableDao;
 
-    protected string $table = 'posts';
-    protected string $idColumn = 'post_id';
+    protected function table(): string { return 'posts'; }
+
+    protected function idColumn(): string { return 'post_id'; }
+
+    protected function domainClass(): string { return PostDomain::class; }
 
     public function __construct(PDO $pdo, LoggerInterface $logger)
     {
@@ -541,7 +692,7 @@ class PostDao
 简单 CRUD 之外的查询，使用底层的 `SqlBuilder`：
 
 ```php
-$rows = $dao->getSqlBuilder()
+$rows = $dao->sql()
     ->select(['u.user_name', 'p.title'])
     ->from('users u')
     ->where('u.id = p.user_id', [])
@@ -553,8 +704,7 @@ $rows = $dao->getSqlBuilder()
 ## 类型契约（与 Domain 衔接）
 
 `SingleTableDao` / `CachedDao` 将原始行直接交给 `Domain::fromArray()` —
-`hydrate()`（定义在 `SingleTableDao`，`CachedDao` 复用）即调用
-`{$domainClass}::fromArray($row)`，不做任何 hydration 魔法。Domain 层**零类型转换**：PHP 8.x 强类型命名参数把每个值绑定到
+`hydrate()`（定义在 `SingleTableDao`，`CachedDao` 复用）即对 `domainClass()` 返回的类调用 `fromArray($row)`，不做任何 hydration 魔法。Domain 层**零类型转换**：PHP 8.x 强类型命名参数把每个值绑定到
 构造声明的类型，缺键、多键或类型不匹配都会抛原生 `\Error` / `\TypeError`
 （参见 migears/domain「类型契约」）。
 

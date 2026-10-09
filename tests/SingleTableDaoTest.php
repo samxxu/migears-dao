@@ -18,8 +18,6 @@ class SingleTableDaoTest extends TestCase
 {
     private UserDao $dao;
 
-    private UserDomainDao $domainDao;
-
     protected function setUp(): void
     {
         $pdo = new PDO('sqlite::memory:');
@@ -53,14 +51,13 @@ class SingleTableDaoTest extends TestCase
         }
 
         $this->dao = new UserDao($pdo, new NullLogger());
-        $this->domainDao = new UserDomainDao($pdo, new NullLogger());
     }
 
-    public function testGetByIdReturnsRow(): void
+    public function testGetByIdReturnsDomain(): void
     {
         $user = $this->dao->getById(1);
-        $this->assertNotNull($user);
-        $this->assertEquals('Alice', $user['user_name']);
+        $this->assertInstanceOf(UserDomain::class, $user);
+        $this->assertSame('Alice', $user->user_name);
     }
 
     public function testGetByIdReturnsNullWhenNotFound(): void
@@ -68,10 +65,11 @@ class SingleTableDaoTest extends TestCase
         $this->assertNull($this->dao->getById(999));
     }
 
-    public function testGetByIdOrFailReturnsRow(): void
+    public function testGetByIdOrFailReturnsDomain(): void
     {
         $user = $this->dao->getByIdOrFail(1);
-        $this->assertEquals('Alice', $user['user_name']);
+        $this->assertInstanceOf(UserDomain::class, $user);
+        $this->assertSame('Alice', $user->user_name);
     }
 
     public function testGetByIdOrFailThrowsWhenNotFound(): void
@@ -80,12 +78,13 @@ class SingleTableDaoTest extends TestCase
         $this->dao->getByIdOrFail(999);
     }
 
-    public function testGetByIdsReturnsIndexedById(): void
+    public function testGetByIdsReturnsDomainsIndexedById(): void
     {
         $users = $this->dao->getByIds([1, 2, 3]);
         $this->assertCount(3, $users);
-        $this->assertEquals('Alice', $users[1]['user_name']);
-        $this->assertEquals('Bob', $users[2]['user_name']);
+        $this->assertContainsOnlyInstancesOf(UserDomain::class, $users);
+        $this->assertSame('Alice', $users[1]->user_name);
+        $this->assertSame('Bob', $users[2]->user_name);
     }
 
     public function testGetByIdsWithEmptyArrayReturnsEmpty(): void
@@ -107,11 +106,12 @@ class SingleTableDaoTest extends TestCase
         $this->assertCount(2, $users);
     }
 
-    public function testGetAllReturnsAllRows(): void
+    public function testGetAllReturnsDomains(): void
     {
         $users = $this->dao->getAll();
         $this->assertCount(5, $users);
-        $this->assertEquals('Eve', $users[0]['user_name']);
+        $this->assertContainsOnlyInstancesOf(UserDomain::class, $users);
+        $this->assertSame('Eve', $users[0]->user_name);
     }
 
     public function testInsertReturnsId(): void
@@ -166,68 +166,9 @@ class SingleTableDaoTest extends TestCase
         $this->assertEquals(5, $this->dao->count());
     }
 
-    public function testPaginate(): void
+    public function testSqlReturnsBuilderInstance(): void
     {
-        $result = $this->dao->paginate(1, 2);
-        $this->assertEquals(5, $result['total']);
-        $this->assertCount(2, $result['records']);
-    }
-
-    public function testPaginateBeyondLastPage(): void
-    {
-        $result = $this->dao->paginate(3, 2);
-        $this->assertEquals(5, $result['total']);
-        $this->assertCount(1, $result['records']);
-    }
-
-    public function testGetTable(): void
-    {
-        $this->assertEquals('users', $this->dao->getTable());
-    }
-
-    public function testGetIdColumn(): void
-    {
-        $this->assertEquals('id', $this->dao->getIdColumn());
-    }
-
-    public function testGetSqlBuilderReturnsInstance(): void
-    {
-        $this->assertInstanceOf(SqlBuilder::class, $this->dao->getSqlBuilder());
-    }
-
-    public function testDaoWithoutTableThrowsException(): void
-    {
-        $this->expectException(SqlException::class);
-
-        $pdo = new PDO('sqlite::memory:');
-        new class($pdo, new NullLogger()) {
-            use SingleTableDao;
-
-            protected string $table = '';
-            protected string $idColumn = 'id';
-
-            public function __construct(PDO $pdo, LoggerInterface $logger)
-            {
-                $this->initDao($pdo, $logger);
-            }
-        };
-    }
-
-    public function testDaoWithoutIdColumnThrowsException(): void
-    {
-        $this->expectException(SqlException::class);
-
-        $pdo = new PDO('sqlite::memory:');
-        new class($pdo, new NullLogger()) {
-            use SingleTableDao;
-
-            protected string $table = 'users';
-
-            public function __construct(PDO $pdo, LoggerInterface $logger)
-            {
-                $this->initDao($pdo, $logger);
-            }
-        };
+        $this->assertInstanceOf(SqlBuilder::class, $this->dao->sql());
     }
 
     public function testCustomIdColumnDao(): void
@@ -245,9 +186,8 @@ class SingleTableDaoTest extends TestCase
         $dao = new PostDao($pdo, new NullLogger());
         $post = $dao->getById(1);
 
-        $this->assertNotNull($post);
-        $this->assertEquals('Hello', $post['title']);
-        $this->assertEquals('post_id', $dao->getIdColumn());
+        $this->assertInstanceOf(PostDomain::class, $post);
+        $this->assertSame('Hello', $post->title);
     }
 
     public function testEmptyTableQueries(): void
@@ -266,12 +206,11 @@ class SingleTableDaoTest extends TestCase
 
     public function testDaoWithDomainRoundTrip(): void
     {
-        $row = $this->dao->getByIdOrFail(1);
-        $user = UserDomain::fromArray($row);
+        $user = $this->dao->getByIdOrFail(1);
         $this->assertSame('Alice', $user->user_name);
 
-        $backToArray = $user->toArray();
-        $this->assertEquals($row, $backToArray);
+        // Domain → array → Domain round-trips unchanged
+        $this->assertEquals($user, UserDomain::fromArray($user->toArray()));
     }
 
     public function testUninitializedDaoThrowsSqlException(): void
@@ -282,8 +221,9 @@ class SingleTableDaoTest extends TestCase
         $dao = new class($pdo, new NullLogger()) {
             use SingleTableDao;
 
-            protected string $table = 'users';
-            protected string $idColumn = 'id';
+            protected function table(): string { return 'users'; }
+            protected function idColumn(): string { return 'id'; }
+            protected function domainClass(): string { return UserDomain::class; }
 
             public function __construct(PDO $pdo, LoggerInterface $logger)
             {
@@ -298,9 +238,9 @@ class SingleTableDaoTest extends TestCase
         $dao = new class(new PDO('sqlite::memory:'), new NullLogger()) {
             use SingleTableDao;
 
-            protected string $table = 'users';
-            protected string $idColumn = 'id';
-            protected string $domainClass = UserDomain::class;
+            protected function table(): string { return 'users'; }
+            protected function idColumn(): string { return 'id'; }
+            protected function domainClass(): string { return UserDomain::class; }
 
             public function __construct(PDO $pdo, LoggerInterface $logger)
             {
@@ -326,15 +266,16 @@ class SingleTableDaoTest extends TestCase
         $this->assertSame('Alice', $user->user_name);
     }
 
-    public function testHydrateWithoutDomainClassThrows(): void
+    public function testHydrateThrowsOnTypeMismatch(): void
     {
-        $this->expectException(SqlException::class);
+        $this->expectException(\TypeError::class);
 
         $dao = new class(new PDO('sqlite::memory:'), new NullLogger()) {
             use SingleTableDao;
 
-            protected string $table = 'users';
-            protected string $idColumn = 'id';
+            protected function table(): string { return 'users'; }
+            protected function idColumn(): string { return 'id'; }
+            protected function domainClass(): string { return UserDomain::class; }
 
             public function __construct(PDO $pdo, LoggerInterface $logger)
             {
@@ -347,25 +288,21 @@ class SingleTableDaoTest extends TestCase
             }
         };
 
-        $dao->hydrateRow(['id' => 1]);
-    }
-
-    public function testFindByIdReturnsHydratedDomain(): void
-    {
-        $user = $this->domainDao->findById(1);
-
-        $this->assertInstanceOf(UserDomain::class, $user);
-        $this->assertSame('Alice', $user->user_name);
-    }
-
-    public function testFindByIdReturnsNullWhenNotFound(): void
-    {
-        $this->assertNull($this->domainDao->findById(999));
+        // UserDomain::id is int; a non-numeric string must fail the strict binding
+        // rather than being silently coerced (the "Type Contract").
+        $dao->hydrateRow([
+            'id' => 'not-an-int',
+            'user_name' => 'Alice',
+            'email' => 'alice@example.com',
+            'age' => 25,
+            'status' => 1,
+            'created_at' => '2026-01-01 00:00:00',
+        ]);
     }
 
     public function testSaveInsertsNewDomainAndNormalisesKeyToInt(): void
     {
-        $created = $this->domainDao->save(new UserDomain(
+        $created = $this->dao->save(new UserDomain(
             id: 0,
             user_name: 'Frank',
             email: 'frank@example.com',
@@ -377,12 +314,12 @@ class SingleTableDaoTest extends TestCase
         $this->assertInstanceOf(UserDomain::class, $created);
         $this->assertSame(6, $created->id);
         $this->assertSame('Frank', $created->user_name);
-        $this->assertNotNull($this->domainDao->getById(6));
+        $this->assertNotNull($this->dao->getById(6));
     }
 
     public function testSaveUpdatesExistingDomain(): void
     {
-        $saved = $this->domainDao->save(new UserDomain(
+        $saved = $this->dao->save(new UserDomain(
             id: 1,
             user_name: 'Alice Renamed',
             email: 'alice@example.com',
@@ -392,7 +329,7 @@ class SingleTableDaoTest extends TestCase
         ));
 
         $this->assertSame(1, $saved->id);
-        $this->assertSame('Alice Renamed', $this->domainDao->getById(1)['user_name']);
+        $this->assertSame('Alice Renamed', $this->dao->getById(1)->user_name);
     }
 }
 
@@ -400,22 +337,11 @@ class UserDao
 {
     use SingleTableDao;
 
-    protected string $table = 'users';
-    protected string $idColumn = 'id';
+    protected function table(): string { return 'users'; }
 
-    public function __construct(PDO $pdo, LoggerInterface $logger)
-    {
-        $this->initDao($pdo, $logger);
-    }
-}
+    protected function idColumn(): string { return 'id'; }
 
-class UserDomainDao
-{
-    use SingleTableDao;
-
-    protected string $table = 'users';
-    protected string $idColumn = 'id';
-    protected string $domainClass = UserDomain::class;
+    protected function domainClass(): string { return UserDomain::class; }
 
     public function __construct(PDO $pdo, LoggerInterface $logger)
     {
@@ -427,8 +353,11 @@ class PostDao
 {
     use SingleTableDao;
 
-    protected string $table = 'posts';
-    protected string $idColumn = 'post_id';
+    protected function table(): string { return 'posts'; }
+
+    protected function idColumn(): string { return 'post_id'; }
+
+    protected function domainClass(): string { return PostDomain::class; }
 
     public function __construct(PDO $pdo, LoggerInterface $logger)
     {
@@ -447,5 +376,16 @@ class UserDomain
         public readonly int $age,
         public readonly int $status,
         public readonly string $created_at,
+    ) {}
+}
+
+class PostDomain
+{
+    use DataAccess;
+
+    public function __construct(
+        public readonly int $post_id,
+        public readonly string $title,
+        public readonly ?string $content,
     ) {}
 }

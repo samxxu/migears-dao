@@ -4,79 +4,84 @@ declare(strict_types=1);
 
 namespace MiGears\Dao;
 
-use PDO;
 use Psr\Log\LoggerInterface;
 use MiGears\Cache\CacheInterface;
-use MiGears\Sql\Exception\SqlException;
-use MiGears\Sql\Exception\RecordNotFoundException;
 
 /**
  * Cached single-table DAO trait.
  *
- * Adds a caching layer on top of SingleTableDao:
- *   - getById / getByIds check the cache first, fall back to the database,
- *     then hydrate the row into a Domain object via hydrate(), which
- *     SingleTableDao provides ($domainClass::fromArray())
+ * Adds a primary-key cache on top of SingleTableDao:
+ *   - getById / getByIds check the cache first, fall back to the inherited
+ *     Domain read (which already hydrates the row), then cache the Domain
  *   - insert / update / delete invalidate the primary-key cache automatically
  *   - subclasses may override deleteCacheFor() to clear extra cache keys
  *     (e.g. byEmail / bySku) that reference the same Domain
+ *   - a cache hit is returned only when it really is a domainClass() instance;
+ *     anything else is a stale or foreign value: it is warned about, deleted,
+ *     and treated as a miss
  *
- * The using class must declare $table, $idColumn and $domainClass, and call
- * initCachedDao() from its constructor:
+ * Every entity read returns a Domain, because SingleTableDao already hydrates
+ * them; CachedDao only wraps the primary-key reads with caching and inherits
+ * getAll / count / getByIdOrFail unchanged. Pagination is not part of the cache
+ * layer — add OffsetPagination or CursorPagination separately if needed.
+ *
+ * CachedDao touches neither migears/sql nor PDO: it depends only on
+ * CacheInterface and the SingleTableDao contract, so all SQL (and its
+ * exceptions, and the connection) stay in SingleTableDao.
+ *
+ * The using class supplies table(), idColumn() and domainClass() (declared
+ * abstract by SingleTableDao) and calls initDao() + initCachedDao() from its
+ * constructor:
  *
  *   class UserDao
  *   {
  *       use CachedDao;
  *
- *       protected string $table = 'users';
- *       protected string $idColumn = 'id';
- *       protected string $domainClass = UserDomain::class;
+ *       protected function table(): string { return 'users'; }
+ *       protected function idColumn(): string { return 'id'; }
+ *       protected function domainClass(): string { return UserDomain::class; }
  *
  *       public function __construct(PDO $pdo, LoggerInterface $logger, CacheInterface $cache)
  *       {
- *           $this->initCachedDao($pdo, $logger, $cache);
+ *           $this->initDao($pdo, $logger);
+ *           $this->initCachedDao($cache, $logger);
  *       }
  *   }
  */
 trait CachedDao
 {
     use SingleTableDao {
-        getById as protected rawGetById;
-        getByIds as protected rawGetByIds;
-        getAll as protected rawGetAll;
-        count as protected rawCount;
-        insert as protected rawInsert;
-        update as protected rawUpdate;
-        delete as protected rawDelete;
-        paginate as protected rawPaginate;
+        getById as protected dbGetById;
+        getByIds as protected dbGetByIds;
+        insert as protected dbInsert;
+        update as protected dbUpdate;
+        delete as protected dbDelete;
     }
 
     protected CacheInterface $cache;
 
     protected ?LoggerInterface $logger = null;
 
-    protected function initCachedDao(
-        PDO $pdo,
-        LoggerInterface $logger,
-        CacheInterface $cache,
-    ): void {
-        $this->initDao($pdo, $logger);
-        if (!isset($this->domainClass) || $this->domainClass === '') {
-            throw new SqlException(static::class . ' must define $domainClass property');
-        }
-        $this->logger = $logger;
+    /**
+     * Initialises the cache layer: the cache and the logger its failures are
+     * reported to. The database connection belongs to SingleTableDao, so the
+     * using class calls initDao() separately.
+     */
+    protected function initCachedDao(CacheInterface $cache, LoggerInterface $logger): void
+    {
         $this->cache = $cache;
+        $this->logger = $logger;
     }
 
     /**
      * Returns the cache layer, ensuring initCachedDao() has been called.
      *
-     * @throws SqlException if initCachedDao() has not been called
+     * @throws \LogicException if initCachedDao() has not been called
      */
     private function cache(): CacheInterface
     {
         if (!isset($this->cache)) {
-            throw new SqlException(static::class . ' has not been initialized; call initCachedDao() from the constructor.');
+            throw new \LogicException(static::class . ' has not been initialized; call initCachedDao() from the constructor.');
         }
         return $this->cache;
     }
@@ -124,38 +129,72 @@ trait CachedDao
      */
     private function domainId(object $domain): int|string|null
     {
-        if (!property_exists($domain, $this->idColumn)) {
+        if (!property_exists($domain, $this->idColumn())) {
             return null;
         }
 
         static $properties = [];
-        $property = $properties[$domain::class . ':' . $this->idColumn]
-            ??= new \ReflectionProperty($domain, $this->idColumn);
+        $property = $properties[$domain::class . ':' . $this->idColumn()]
+            ??= new \ReflectionProperty($domain, $this->idColumn());
         $value = $property->getValue($domain);
         return is_int($value) || is_string($value) ? $value : null;
     }
 
+    /**
+     * Discards a cache entry that is not a Domain of this DAO's class.
+     *
+     * A hit is only trusted when it really is a domainClass() instance; any
+     * other non-null value is stale or foreign (an old class shape after a
+     * deploy, a colliding key). Warn the developer and delete the key so no
+     * dirty value lingers — the caller then treats the read as a miss.
+     */
+    private function purgeDirty(string $key, mixed $value): void
+    {
+        $this->logger?->warning(
+            'CachedDao: discarding a cache value that is not a Domain',
+            ['key' => $key, 'type' => get_debug_type($value)],
+        );
+        try {
+            $this->cache()->delete($key);
+        } catch (\Throwable $e) {
+            $this->logger?->warning('CachedDao: cache delete failed', ['exception' => $e]);
+        }
+    }
+
+    /**
+     * Reads one Domain by primary key, served from the cache when present.
+     *
+     * A hit is trusted only when it is a domainClass() instance; a stale or
+     * foreign value is discarded (purgeDirty) and treated as a miss. A miss
+     * delegates to the inherited read, which fetches and hydrates the row, and
+     * the returned Domain is stored under the primary-key cache key.
+     */
     public function getById(int|string $id): ?object
     {
         $cache = $this->cache();
+        $key = $this->cacheKey($this->table(), $id);
         try {
-            $cached = $cache->get($this->cacheKey($this->table, $id));
+            $cached = $cache->get($key);
         } catch (\Throwable $e) {
             $this->logger?->warning('CachedDao: cache read failed; falling back to database', ['exception' => $e]);
             $cached = null;
         }
-        if (is_object($cached)) {
+
+        $domainClass = $this->domainClass();
+        if ($cached instanceof $domainClass) {
             return $cached;
         }
+        if ($cached !== null) {
+            $this->purgeDirty($key, $cached);
+        }
 
-        $row = $this->rawGetById($id);
-        if ($row === null) {
+        $domain = $this->dbGetById($id);
+        if ($domain === null) {
             return null;
         }
 
-        $domain = $this->hydrate($row);
         try {
-            $cache->set($this->cacheKey($this->table, $id), $domain);
+            $cache->set($key, $domain);
         } catch (\Throwable $e) {
             $this->logger?->warning('CachedDao: cache write failed', ['exception' => $e]);
         }
@@ -163,34 +202,13 @@ trait CachedDao
     }
 
     /**
-     * Canonical read entry, served from the cache.
+     * Batch-reads Domains by primary key, filling the cache entry by entry.
      *
-     * Overrides SingleTableDao::findById(): here getById() already returns a
-     * hydrated Domain, so hydrating a second time would be wrong — reuse it.
+     * Cache hits are keyed by the Domain's own primary key; a hit is trusted
+     * only when it is a domainClass() instance (a stale or foreign value is
+     * purged and treated as a miss); misses are read from the database in one
+     * query and cached.
      */
-    public function findById(int|string $id): ?object
-    {
-        return $this->getById($id);
-    }
-
-    /**
-     * Returns the hydrated Domain object for the given primary key,
-     * or throws RecordNotFoundException if no such record exists.
-     *
-     * Overrides SingleTableDao::getByIdOrFail() so the return type matches
-     * CachedDao::getById() (Domain object instead of raw array).
-     *
-     * @throws RecordNotFoundException
-     */
-    public function getByIdOrFail(int|string $id): object
-    {
-        $domain = $this->getById($id);
-        if ($domain === null) {
-            throw new RecordNotFoundException($this->table, $id);
-        }
-        return $domain;
-    }
-
     public function getByIds(array $ids): array
     {
         $ids = array_values(array_unique($ids));
@@ -199,27 +217,31 @@ trait CachedDao
         }
 
         $cache = $this->cache();
+        $domainClass = $this->domainClass();
         $result = [];
         $missing = [];
         foreach ($ids as $id) {
+            $key = $this->cacheKey($this->table(), $id);
             try {
-                $cached = $cache->get($this->cacheKey($this->table, $id));
+                $cached = $cache->get($key);
             } catch (\Throwable $e) {
                 $this->logger?->warning('CachedDao: cache read failed; falling back to database', ['exception' => $e]);
                 $cached = null;
             }
-            if (is_object($cached)) {
+            if ($cached instanceof $domainClass) {
                 $result[$this->domainId($cached) ?? $id] = $cached;
-            } else {
-                $missing[] = $id;
+                continue;
             }
+            if ($cached !== null) {
+                $this->purgeDirty($key, $cached);
+            }
+            $missing[] = $id;
         }
 
         if ($missing !== []) {
-            foreach ($this->rawGetByIds($missing) as $id => $row) {
-                $domain = $this->hydrate($row);
+            foreach ($this->dbGetByIds($missing) as $id => $domain) {
                 try {
-                    $cache->set($this->cacheKey($this->table, $id), $domain);
+                    $cache->set($this->cacheKey($this->table(), $id), $domain);
                 } catch (\Throwable $e) {
                     $this->logger?->warning('CachedDao: cache write failed', ['exception' => $e]);
                 }
@@ -230,32 +252,10 @@ trait CachedDao
         return $result;
     }
 
-    public function getAll(): array
-    {
-        return array_map(fn(array $row) => $this->hydrate($row), $this->rawGetAll());
-    }
-
-    /**
-     * Paginated query with hydrated Domain objects in records.
-     *
-     * @return array{records: array<int, object>, total: int}
-     */
-    public function paginate(int $page, int $pageSize): array
-    {
-        $result = $this->rawPaginate($page, $pageSize);
-        $result['records'] = array_map(fn(array $row) => $this->hydrate($row), $result['records']);
-        return $result;
-    }
-
-    public function count(): int
-    {
-        return $this->rawCount();
-    }
-
     public function insert(array $data): string
     {
-        $explicitId = $data[$this->idColumn] ?? null;
-        $id = $this->rawInsert($data);
+        $explicitId = $data[$this->idColumn()] ?? null;
+        $id = $this->dbInsert($data);
         try {
             $this->cacheRemove($explicitId ?? $id);
         } catch (\Throwable $e) {
@@ -264,17 +264,18 @@ trait CachedDao
         return $id;
     }
 
+    /**
+     * Updates a record and invalidates its cache entry.
+     *
+     * The primary-key validation (and its exception) belongs to the inherited
+     * update(); this override only adds the cache invalidation, so the cache
+     * layer raises nothing of its own here.
+     */
     public function update(array $data): int
     {
-        if (!isset($data[$this->idColumn])) {
-            throw new SqlException("Update data must contain the primary key column '{$this->idColumn}'");
-        }
-        $id = $data[$this->idColumn];
-        unset($data[$this->idColumn]);
-
-        $affected = $data === [] ? 0 : $this->rawUpdate($data + [$this->idColumn => $id]);
+        $affected = $this->dbUpdate($data);
         try {
-            $this->cacheRemove($id);
+            $this->cacheRemove($data[$this->idColumn()]);
         } catch (\Throwable $e) {
             $this->logger?->warning('CachedDao: cache invalidation failed after update', ['exception' => $e]);
         }
@@ -283,7 +284,7 @@ trait CachedDao
 
     public function delete(int|string $id): int
     {
-        $affected = $this->rawDelete($id);
+        $affected = $this->dbDelete($id);
         try {
             $this->cacheRemove($id);
         } catch (\Throwable $e) {
@@ -294,25 +295,26 @@ trait CachedDao
 
     /**
      * Clears the primary-key cache entry. Extra related keys are cleared by
-     * subclasses overriding deleteCacheFor(), which receives the fresh row
+     * subclasses overriding deleteCacheFor(), which receives the fresh Domain
      * (uncached read) so it reflects the state after the write. When the hook
      * is not overridden the read-back is skipped: there is no one to receive
-     * the row, so the extra SELECT would be pure overhead on every write.
+     * the Domain, so the extra SELECT would be pure overhead on every write.
      */
     public function cacheRemove(int|string $id): void
     {
-        $this->cache()->delete($this->cacheKey($this->table, $id));
+        $this->cache()->delete($this->cacheKey($this->table(), $id));
         if (!$this->deleteCacheForIsOverridden()) {
             return;
         }
-        $row = $this->rawGetById($id);
-        $this->deleteCacheFor($row === null ? null : $this->hydrate($row));
+        $this->deleteCacheFor($this->dbGetById($id));
     }
 
     /**
-     * Detects, once per class, whether deleteCacheFor() is overridden. A trait
-     * method keeps the trait's file as its source, so a differing file means the
-     * using class (or a parent) supplied its own implementation.
+     * Detects, once per class, whether deleteCacheFor() is overridden, so that
+     * cacheRemove() pays the read-back SELECT only when a hook will receive the
+     * Domain. A trait method keeps the trait's file as its source, so a
+     * differing file means the using class (or a parent) supplied its own
+     * implementation.
      */
     private function deleteCacheForIsOverridden(): bool
     {
@@ -320,7 +322,12 @@ trait CachedDao
         return $overridden[static::class] ??= (new \ReflectionMethod($this, 'deleteCacheFor'))->getFileName() !== __FILE__;
     }
 
-    /** Subclass hook: clear extra cache keys referencing the same Domain. */
+    /**
+     * Subclass hook: clear extra cache keys that reference the same Domain
+     * (e.g. a byEmail / bySku lookup). cacheRemove() calls it with the fresh
+     * Domain — an uncached read taken after the write — or null when the record
+     * no longer exists. The default implementation is a no-op.
+     */
     protected function deleteCacheFor(?object $domain): void
     {
     }
