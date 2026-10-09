@@ -34,7 +34,8 @@ use MiGears\Sql\Exception\SqlException;
  *   $user = $dao->getById(1);        // UserDomain|null
  *   $user = $dao->getByIdOrFail(1);  // UserDomain (throws if not found)
  *   $id   = $dao->insert($data);     // last insert id
- *   $n    = $dao->update($data);     // affected rows
+ *   $user = $dao->save($userDomain); // Domain in, persisted Domain out (insert or update)
+ *   $n    = $dao->patch($userDomain, ['user_name']); // affected rows, named columns only
  *   $n    = $dao->delete(1);         // affected rows
  *
  * Every entity read (getById / getByIdOrFail / getByIds / getAll) returns
@@ -242,6 +243,42 @@ trait SingleTableDao
             ->set($data)
             ->filter([$this->idColumn() => $id])
             ->execute();
+    }
+
+    /**
+     * Updates only the named columns of a Domain's row, located by its primary key.
+     *
+     * Where save() / update() write the whole row, patch() sends just $fields:
+     * a column the caller did not name is never touched, so a concurrent change
+     * to another column is not clobbered and a wide row's payload stays small.
+     *
+     * The Domain is the value source (as in save()): the caller names the changed
+     * columns and the DAO reads their new values off the Domain. The primary key
+     * comes from the Domain, never from $fields.
+     *
+     * @param object             $domain Domain carrying the primary key and the new values
+     * @param array<int, string> $fields Column names to update
+     * @return int affected rows
+     * @throws SqlException no column named, primary key missing, or a field is not a Domain column
+     */
+    public function patch(object $domain, array $fields): int
+    {
+        if ($fields === []) {
+            throw new SqlException('Patch must name at least one column to update');
+        }
+
+        /** @var array<string, mixed> $row */
+        $row = $domain->toArray(); // @phpstan-ignore method.notFound
+
+        $data = [$this->idColumn() => $row[$this->idColumn()] ?? null];
+        foreach ($fields as $field) {
+            if (!array_key_exists($field, $row)) {
+                throw new SqlException("Patch field '{$field}' is not a column of {$this->domainClass()}");
+            }
+            $data[$field] = $row[$field];
+        }
+
+        return $this->update($data);
     }
 
     /**

@@ -23,6 +23,10 @@ The API is shaped around one convention:
 - **Writes take a Domain** — `save(object $domain): object` is the canonical
   write entry: a Domain carrying a primary key is updated, otherwise it is
   inserted and the persisted Domain is returned.
+- **The targeted write is `patch(Domain, columns)`** — `save()` writes the whole
+  row, while `patch()` sends only the named columns, so an unnamed column is
+  never clobbered (a concurrent change to it survives) and a wide row's payload
+  stays small.
 - **Reads/queries take scalars** — `getById(int|string $id)`, `getByIds` and
   `getAll` are located by scalar values, never by a Domain.
 - **Entity queries return a Domain** — a DAO's entity reads (`getById` /
@@ -45,7 +49,7 @@ application's job.
 
 **In scope**
 
-- Single-table CRUD, delivered as a trait rather than a base class: entity reads (`getById` / `getByIdOrFail` / `getByIds` / `getAll`) returning hydrated Domains, plus `count` / `insert` / `update` / `delete`, with a configurable `$idColumn` for a non-`id` primary key.
+- Single-table CRUD, delivered as a trait rather than a base class: entity reads (`getById` / `getByIdOrFail` / `getByIds` / `getAll`) returning hydrated Domains, plus `count` / `insert` / `update` / `patch` / `delete`, with a configurable `$idColumn` for a non-`id` primary key.
 - Two opt-in pagination traits layered on the CRUD trait: `OffsetPagination` (`paginate()` → `MiGears\Utils\Paginator`, one `COUNT(*)` per page for an exact total) and `CursorPagination` (`paginateAfter()` → `MiGears\Utils\FlowPaginator`, one extra row per page instead of a count).
 - Abstract `table()` / `idColumn()` / `domainClass()` hooks plus `hydrate()` and `save(Domain)`, which turn rows into Domain objects and persist Domains back; `CachedDao` builds on the same contract.
 - All data-access logic for one table, including complex joins and multi-table queries issued through the underlying `SqlBuilder` (`sql()`); those projections come back as raw rows.
@@ -239,9 +243,60 @@ echo $user->user_name;  // "Alice"
 // save() takes a Domain and returns the persisted Domain (insert or update)
 $user = $dao->save($userDomain);
 
-// Writes also accept the array form that toArray() produces
-$dao->update($user->toArray());
+// patch() writes only the named columns of a Domain that already holds the new
+// values; every other column — including one changed concurrently — is untouched
+$dao->patch($userDomain, ['user_name']);
 ```
+
+Pick the write that matches the intent — `save()` first, and reach for the
+lower-level methods only when they earn it:
+
+- **`save(Domain)` — the default write.** You hold a complete Domain and mean to
+  persist the whole row (insert when it has no key, full update otherwise). Start
+  here.
+- **`patch(Domain, columns)` — for a targeted write.** It sends only the named
+  columns, so reach for it when only a few columns change, when another column may
+  have changed since you read the Domain (patch cannot clobber it), or when the
+  row is wide (large `TEXT`/`BLOB`) and re-sending every column is wasteful. It
+  locates the row by the Domain's primary key, never inserts, and naming no column
+  is an error.
+- **`update(array)` — low-level; do not call it in ordinary code.** It takes a
+  raw column map instead of a Domain, and is the primitive `save()` and `patch()`
+  are built on.
+- **`insert(array)` — low-level; avoid it, with one exception.** `save()` already
+  inserts a Domain that carries no key, so `insert()` is needed only when the
+  caller must assign the primary key itself — a UUID or a natural key. `save()`
+  cannot cover that case: it reads *any* non-empty key as an existing row and
+  would update nothing instead of inserting. That caller-assigned key is the
+  exception which justifies `insert()`:
+
+  ```php
+  // save() sees a non-empty key and updates nothing; insert() is the one path
+  // that persists a caller-assigned key.
+  $dao->insert(['uuid' => $uuid, 'user_name' => 'Alice']);
+  ```
+
+### Patching a few columns
+
+`patch()` reads the values straight off the Domain it is handed — it never
+rebuilds or copies it. Pass a Domain that already carries the values you want
+written, and name the columns to persist:
+
+```php
+// The Domain already holds the new values (built by whatever flow produced it).
+$affected = $dao->patch($user, ['user_name', 'email']);
+
+// UPDATE `users` SET `user_name` = :set_user_name, `email` = :set_email WHERE `id` = …
+// Only the named columns reach the SET clause: age, status and created_at keep
+// whatever the row holds — even if another writer changed them after your read.
+
+$affected;  // 1 — rows changed (0 when the row no longer exists)
+```
+
+This is what separates `patch()` from `save()`: a Domain built from a request
+often carries values for columns that are not yours to write, and `patch()` writes
+only the columns you name. Naming no column throws, and a name that is not a
+column of the Domain throws too.
 
 ### Using CachedDao
 
@@ -404,6 +459,7 @@ MIT
 API 的形状只为一条约定服务：
 
 - **写操作收 Domain** —— 规范写入口是 `save(object $domain): object`：Domain 带主键则更新，否则插入并返回落库后的 Domain。
+- **定向写是 `patch(Domain, columns)`** —— `save()` 写整行，而 `patch()` 只发送指定的列，未点名的列绝不触碰（对它的并发修改得以保留），宽表载荷也更小。
 - **读/查询收标量** —— `getById(int|string $id)`、`getByIds` 与 `getAll` 只用标量定位，绝不以 Domain 为入参。
 - **实体查询返回 Domain** —— DAO 的实体读（`getById` / `getByIdOrFail` / `getByIds` / `getAll`）返回 hydrate 后的 `Domain` 对象。分页是独立的、可选的策略：`OffsetPagination::paginate()` 与 `CursorPagination::paginateAfter()` 把一页 Domain 装进对应的 `migears/utils` DTO。聚合（`count`）与经 `sql()` 发出的投影是刻意的例外：它们不是实体，返回标量 / 原始行。
 - **Manager 是边界** —— 只有 Manager 层同时持有 Domain 与 DAO 并把两者接起来；其上的层（resource / controller）只见 Domain、不见 DAO。Domain 与「行」相遇之处是 DAO 自己。
@@ -414,7 +470,7 @@ API 的形状只为一条约定服务：
 
 **范围内**
 
-- 以 trait 而非基类提供单表 CRUD：实体读（`getById` / `getByIdOrFail` / `getByIds` / `getAll`）返回 hydrate 后的 Domain，另有 `count` / `insert` / `update` / `delete`，并可用 `$idColumn` 配置非 `id` 主键。
+- 以 trait 而非基类提供单表 CRUD：实体读（`getById` / `getByIdOrFail` / `getByIds` / `getAll`）返回 hydrate 后的 Domain，另有 `count` / `insert` / `update` / `patch` / `delete`，并可用 `$idColumn` 配置非 `id` 主键。
 - 两个可选的、叠加在 CRUD trait 之上的分页 trait：`OffsetPagination`（`paginate()` → `MiGears\Utils\Paginator`，每页一次 `COUNT(*)` 换精确总数）与 `CursorPagination`（`paginateAfter()` → `MiGears\Utils\FlowPaginator`，用多取一行代替计数）。
 - 抽象钩子 `table()` / `idColumn()` / `domainClass()`，以及 `hydrate()`、`save(Domain)`：把行转成 Domain、把 Domain 落库；`CachedDao` 在同一契约之上构建。
 - 封装单表的全部数据访问逻辑，包括通过底层 `SqlBuilder`（`sql()`）编写的复杂关联查询与多表查询；这些投影仍以原始行返回。
@@ -607,9 +663,39 @@ echo $user->user_name;  // "Alice"
 // save() 收 Domain、返落库后的 Domain（插入或更新）
 $user = $dao->save($userDomain);
 
-// 写操作同样接受 toArray() 产出的数组形式
-$dao->update($user->toArray());
+// patch() 只写「已带新值的 Domain」中点名的列；其余列（含被并发修改的列）保持不动
+$dao->patch($userDomain, ['user_name']);
 ```
+
+按意图选择写方法——**首选 `save()`**，更低层的方法只在确有理由时才用：
+
+- **`save(Domain)` —— 默认写入口。** 你持有完整的 Domain，要整体落库（无主键则插入，否则整行更新）。从这里开始。
+- **`patch(Domain, columns)` —— 定向写时使用。** 它只发送点名的列，因此当只改少数几列、读之后别的列可能已被并发修改（patch 不会覆写它）、或行很宽（大 `TEXT`/`BLOB`）重发全部列不划算时，用它。它按 Domain 主键定位、绝不插入，且不点名任何列即报错。
+- **`update(array)` —— 底层；一般代码不要直接调用。** 它收裸列映射而非 Domain，是 `save()` 与 `patch()` 的底层原语。
+- **`insert(array)` —— 底层；同样避免使用，只有一个例外。** `save()` 已能插入无主键的 Domain，所以只有**主键必须由调用方指定**时才需要 `insert()`——UUID 或自然主键。`save()` 覆盖不了这种情况：它把**任何非空主键**都当成已存在的行，于是只会去更新一行并不存在的记录、静默不插入。这个「调用方指定主键」就是动用 `insert()` 的正当例外：
+
+  ```php
+  // save() 见到非空主键会走 update，结果什么都不插入；insert() 是唯一能持久化
+  // 调用方指定主键的路径。
+  $dao->insert(['uuid' => $uuid, 'user_name' => 'Alice']);
+  ```
+
+### 局部更新（patch）
+
+`patch()` 直接从交给它的 Domain 上取值——不会重建、也不会复制它。给它一个**已带着待写入值**的 Domain，再点名要落库的列：
+
+```php
+// Domain 已带着新值（由你的流程以任意方式产出）。
+$affected = $dao->patch($user, ['user_name', 'email']);
+
+// UPDATE `users` SET `user_name` = :set_user_name, `email` = :set_email WHERE `id` = …
+// 只有点名的列进入 SET：age、status、created_at 保持行内现值——即使在你读取之后
+// 已被其他写入方改动。
+
+$affected;  // 1 —— 影响行数（行已不存在时为 0）
+```
+
+这正是 `patch()` 与 `save()` 的分野：从请求构造出的 Domain 常带着一些不归你写的列的值，而 `patch()` 只写你点名的那些列。不点名任何列会抛异常，点名了不属于该 Domain 的列同样抛异常。
 
 ### 使用 CachedDao
 

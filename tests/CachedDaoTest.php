@@ -228,6 +228,20 @@ class CachedDaoTest extends TestCase
         $this->assertNull($this->dao->getById(1));
     }
 
+    public function testPatchInvalidatesPrimaryKeyCache(): void
+    {
+        $user = $this->dao->getById(1);
+        $this->assertTrue($this->cache->has('users_1'));
+
+        // patch() routes through the overridden update(), so the cache entry
+        // must be cleared just as a full update() would clear it.
+        $affected = $this->dao->patch($user->with(['user_name' => 'Alice Patched']), ['user_name']);
+
+        $this->assertSame(1, $affected);
+        $this->assertFalse($this->cache->has('users_1'));
+        $this->assertSame('Alice Patched', $this->dao->getById(1)->user_name);
+    }
+
     public function testGetAllHydratesDomains(): void
     {
         $users = $this->dao->getAll();

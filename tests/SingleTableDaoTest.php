@@ -148,6 +148,82 @@ class SingleTableDaoTest extends TestCase
         $this->assertEquals(0, $this->dao->update(['id' => 1]));
     }
 
+    public function testPatchUpdatesOnlyNamedColumns(): void
+    {
+        $user = $this->dao->getByIdOrFail(1);
+
+        // The Domain carries a new email too, but only user_name is named.
+        $affected = $this->dao->patch($user->with([
+            'user_name' => 'Alice Patched',
+            'email' => 'changed@example.com',
+        ]), ['user_name']);
+
+        $this->assertSame(1, $affected);
+        $reloaded = $this->dao->getById(1);
+        $this->assertSame('Alice Patched', $reloaded->user_name);
+        $this->assertSame('alice@example.com', $reloaded->email);
+    }
+
+    public function testPatchDoesNotClobberAConcurrentChangeToAnUnnamedColumn(): void
+    {
+        $stale = $this->dao->getByIdOrFail(1);
+
+        // Another writer changes the email after $stale was read.
+        $this->dao->update(['id' => 1, 'email' => 'concurrent@example.com']);
+
+        // Patching only the name from the stale Domain must leave email alone.
+        $this->dao->patch($stale->with(['user_name' => 'Alice Patched']), ['user_name']);
+
+        $reloaded = $this->dao->getById(1);
+        $this->assertSame('Alice Patched', $reloaded->user_name);
+        $this->assertSame('concurrent@example.com', $reloaded->email);
+    }
+
+    public function testPatchWithEmptyFieldListThrowsException(): void
+    {
+        $this->expectException(SqlException::class);
+        $this->dao->patch($this->dao->getByIdOrFail(1), []);
+    }
+
+    public function testPatchUnknownFieldThrowsException(): void
+    {
+        $this->expectException(SqlException::class);
+        $this->dao->patch($this->dao->getByIdOrFail(1), ['not_a_column']);
+    }
+
+    public function testPatchNonExistentRowReturnsZero(): void
+    {
+        $ghost = new UserDomain(
+            id: 999,
+            user_name: 'Ghost',
+            email: 'ghost@example.com',
+            age: 1,
+            status: 1,
+            created_at: '2026-01-01 00:00:00',
+        );
+
+        $this->assertSame(0, $this->dao->patch($ghost, ['user_name']));
+    }
+
+    public function testPatchUsesCustomIdColumn(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+        $pdo->exec('CREATE TABLE posts (post_id INTEGER PRIMARY KEY AUTOINCREMENT, title VARCHAR(100) NOT NULL, content TEXT)');
+        $pdo->exec("INSERT INTO posts (title, content) VALUES ('Hello', 'World')");
+
+        $dao = new PostDao($pdo, new NullLogger());
+        $affected = $dao->patch(
+            new PostDomain(post_id: 1, title: 'Hello Patched', content: 'Ignored'),
+            ['title'],
+        );
+
+        $this->assertSame(1, $affected);
+        $this->assertSame('Hello Patched', $dao->getById(1)->title);
+        $this->assertSame('World', $dao->getById(1)->content);
+    }
+
     public function testDeleteById(): void
     {
         $affected = $this->dao->delete(1);
