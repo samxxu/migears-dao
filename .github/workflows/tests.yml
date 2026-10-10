@@ -56,6 +56,12 @@ jobs:
           repository: ${{ github.repository_owner }}/migears-cache
           path: migears-cache
 
+      - name: Check out migears-utils
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository_owner }}/migears-utils
+          path: migears-utils
+
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
