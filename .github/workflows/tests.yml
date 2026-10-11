@@ -15,12 +15,12 @@ jobs:
 
     name: PHP ${{ matrix.php }}
 
-    # composer.json resolves migears/sql, migears/domain, migears/validator and
-    # migears/cache through path repositories ("../migears-*") and none of them
-    # is on Packagist, so they have to sit beside this package rather than under
-    # vendor/. That is also why every command runs from a subdirectory: those
-    # paths are relative to this package's own directory, so this package cannot
-    # be checked out at the workspace root.
+    # composer.json resolves migears/sql, migears/domain, migears/validator,
+    # migears/cache and migears/utils through path repositories ("../migears-*")
+    # and none of them is on Packagist, so they have to sit beside this package
+    # rather than under vendor/. That is also why every command runs from a
+    # subdirectory: those paths are relative to this package's own directory, so
+    # this package cannot be checked out at the workspace root.
     defaults:
       run:
         working-directory: migears-dao
